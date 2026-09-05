@@ -2,9 +2,10 @@
   description = "MGS3 quick camouflage menu";
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    imgui = { url = "github:ocornut/imgui/v1.92.9b"; flake = false; };
     minhook = { url = "github:TsudaKageyu/minhook/v1.3.4"; flake = false; };
   };
-  outputs = { self, nixpkgs, minhook }:
+  outputs = { self, nixpkgs, imgui, minhook }:
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
@@ -15,7 +16,7 @@
         version = "0.0.1";
         src = self;
         nativeBuildInputs = [ mingw.buildPackages.cmake mingw.buildPackages.ninja ];
-        inherit minhook;
+        inherit imgui minhook;
         installPhase = ''
           mkdir -p $out
           cp qcamo.asi $out/

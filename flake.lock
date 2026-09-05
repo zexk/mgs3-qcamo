@@ -1,5 +1,22 @@
 {
   "nodes": {
+    "imgui": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1785507282,
+        "narHash": "sha256-IjW+qddzKu9jOj3QCGhkChVK2UOvwl493ffUIIn/ZVQ=",
+        "owner": "ocornut",
+        "repo": "imgui",
+        "rev": "f1cc2ae15e53a861a874c3034aae6798fde194ab",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ocornut",
+        "ref": "v1.92.9b",
+        "repo": "imgui",
+        "type": "github"
+      }
+    },
     "minhook": {
       "flake": false,
       "locked": {
@@ -35,6 +52,7 @@
     },
     "root": {
       "inputs": {
+        "imgui": "imgui",
         "minhook": "minhook",
         "nixpkgs": "nixpkgs"
       }

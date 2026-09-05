@@ -8,6 +8,7 @@
 #include "common/log.h"
 #include "common/mem.h"
 #include "game_mgs3.h"
+#include "overlay.h"
 
 namespace {
 
@@ -15,8 +16,9 @@ using Dispatch = intptr_t(__fastcall*)(void*, uint32_t, void*);
 Dispatch original_dispatch;
 uintptr_t image_base;
 bool applying;
-std::atomic_bool pending;
-uint64_t settle_until;
+std::atomic_int pending_uniform{-1};
+std::atomic_uint64_t settle_until;
+std::atomic_bool change_busy;
 
 template <typename Function>
 Function game_function(uint32_t rva)
@@ -65,18 +67,24 @@ void* load_asset(uint32_t type, int id)
     return queue;
 }
 
-void change_camo()
+void change_camo(uint8_t next)
 {
     auto stats = qcamo::mem::read<uintptr_t>(image_base + qcamo::mgs3::kStatsSlot);
     auto player = qcamo::mem::read<void*>(image_base + qcamo::mgs3::kPlayerSlot);
     if (!stats || !player || !qcamo::mem::range_readable(stats, 0x680)) {
-        LOG_WARN("F6 ignored: gameplay state unavailable");
+        change_busy = false;
+        LOG_WARN("uniform change ignored: gameplay state unavailable");
         return;
     }
 
     auto address = stats + qcamo::mgs3::kEquippedUniform;
     uint8_t current = qcamo::mem::read<uint8_t>(address);
-    uint8_t next = current == 0 ? 1 : 0; // Olive Drab <-> Tiger Stripe.
+    if (current == next) {
+        LOG_INFO("uniform %u already equipped", current);
+        change_busy = false;
+        return;
+    }
+    settle_until = GetTickCount64() + 4000;
     uint8_t face = qcamo::mem::read<uint8_t>(stats + qcamo::mgs3::kEquippedFace);
     int id = game_function<int(__fastcall*)(uint32_t, int)>(
         qcamo::mgs3::kUniformAssetId)(qcamo::mgs3::kUniformAssetType, next);
@@ -112,7 +120,6 @@ void change_camo()
             qcamo::mgs3::kApplyFace)(qcamo::mgs3::kFaceAssetSlot,
                                      qcamo::mgs3::kFaceAssetId, prepared);
     }
-    settle_until = GetTickCount64() + 3000;
     LOG_INFO("uniform %u -> %u applied; settling", current, next);
 }
 
@@ -125,16 +132,29 @@ intptr_t __fastcall dispatch_hook(void* target, uint32_t message, void* data)
         if (settle_until && GetTickCount64() >= settle_until) {
             send_player(qcamo::mgs3::kRefreshCamo);
             settle_until = 0;
-            pending = false;
-            LOG_INFO("change complete; F6 ready");
-        } else if (settle_until && pending.exchange(false)) {
-            LOG_INFO("F6 ignored: change still settling");
-        } else if (!settle_until && pending.exchange(false)) {
-            change_camo();
+            pending_uniform = -1;
+            change_busy = false;
+            LOG_INFO("change complete; input ready");
+        } else if (settle_until && pending_uniform.exchange(-1) >= 0) {
+            LOG_INFO("uniform change ignored: still settling");
+        } else if (!settle_until) {
+            int requested = pending_uniform.exchange(-1);
+            if (requested >= 0) change_camo(static_cast<uint8_t>(requested));
         }
         applying = false;
     }
     return result;
+}
+
+bool queue_uniform(uint8_t uniform)
+{
+    if (change_busy.exchange(true)) {
+        LOG_INFO("uniform %u ignored: change gate active", uniform);
+        return false;
+    }
+    pending_uniform = uniform;
+    LOG_INFO("uniform %u queued", uniform);
+    return true;
 }
 
 std::filesystem::path own_dir()
@@ -171,13 +191,18 @@ DWORD WINAPI init(LPVOID)
         LOG_ERROR("message hook failed");
         return 0;
     }
-    LOG_INFO("ready: F6 toggles Olive Drab/Tiger Stripe");
+    if (!qcamo::start_overlay(image_base, queue_uniform)) {
+        LOG_ERROR("quick menu hook failed");
+    }
+    LOG_INFO("ready: F7 menu; F6 toggles Olive Drab/Tiger Stripe");
     bool held = false;
     for (;;) {
         bool down = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
         if (down && !held) {
-            pending = true;
-            LOG_INFO("F6 queued");
+            auto stats = qcamo::mem::read<uintptr_t>(image_base + qcamo::mgs3::kStatsSlot);
+            uint8_t current = stats ? qcamo::mem::read<uint8_t>(
+                                          stats + qcamo::mgs3::kEquippedUniform) : 0;
+            queue_uniform(current == 0 ? 1 : 0);
         }
         held = down;
         Sleep(10);
