@@ -389,9 +389,16 @@ Signals for "playable gameplay", all read-only and checked fail-closed:
 | Signal | Blocks when |
 | --- | --- |
 | Stats area code `+0x24` | First char is not `s` or `v` |
+| Survival flags `+0x680` | Backpack bit `0x400` is clear |
 | Viewer context `0x1E14AE0` | Non-null |
 | `GV_PauseLevel` | Any bit outside the wheel bit; the wheel bit too on the opening edge |
 | Player state flags | `(A \| B) & 0xFE000200` is non-zero |
+
+`0x311444` tests bit `0x400` at stats `+0x680`. When clear, the Survival
+Viewer writes disabled-entry mask `0x0B`, which disables CAMOUFLAGE, BACKPACK,
+and CURE. The bit is clear before Snake retrieves his backpack and after the
+torture sequence until he recovers his equipment. qcamo uses the same test and
+plays the game's operation-not-permitted cue `0x300F` when opening is refused.
 
 ## Pad input
 

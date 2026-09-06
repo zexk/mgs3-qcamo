@@ -5,6 +5,8 @@
 // - Area code at stats + kAreaCode (7-char stage string). bbtracker treats
 //   s*/v* as gameplay ("s001a", "v000a") and anything else ("title") as out.
 //   This alone excludes title screens and other non-stage states.
+// - Survival flags: the game's own Viewer disables CAMOUFLAGE while its
+//   backpack bit is clear, covering both stripped-equipment sequences.
 // - Survival Viewer context slot: non-null pointer only while the Viewer
 //   screen exists.
 // - GV_PauseLevel: must carry no bits outside our own wheel bit. A set wheel
@@ -26,6 +28,7 @@ enum class GateBlock {
     None,
     Stats,
     Area,
+    Backpack,
     Viewer,
     Cutscene,
     Pause,
@@ -37,6 +40,7 @@ inline const char* gate_name(GateBlock block)
     case GateBlock::None: return "gameplay";
     case GateBlock::Stats: return "stats unavailable";
     case GateBlock::Area: return "non-gameplay area";
+    case GateBlock::Backpack: return "backpack unavailable";
     case GateBlock::Viewer: return "survival viewer open";
     case GateBlock::Cutscene: return "cutscene or uncontrollable state";
     case GateBlock::Pause: return "game paused";
@@ -60,6 +64,12 @@ inline GateBlock gate_state(uintptr_t base, bool allow_wheel)
     char first = mem::read<char>(stats + mgs3::kAreaCode);
     if (first != 's' && first != 'v') {
         return GateBlock::Area;
+    }
+    if (!mem::range_readable(stats + mgs3::kSurvivalFlags, sizeof(uint32_t))) {
+        return GateBlock::Stats;
+    }
+    if ((mem::read<uint32_t>(stats + mgs3::kSurvivalFlags) & mgs3::kHasBackpack) == 0) {
+        return GateBlock::Backpack;
     }
     if (!mem::range_readable(base + mgs3::kViewerSlot, sizeof(uintptr_t))) {
         return GateBlock::Viewer;
@@ -87,11 +97,6 @@ inline GateBlock gate_state(uintptr_t base, bool allow_wheel)
         return GateBlock::Pause;
     }
     return GateBlock::None;
-}
-
-inline bool can_open_menu(uintptr_t base)
-{
-    return gate_state(base, false) == GateBlock::None;
 }
 
 } // namespace qcamo

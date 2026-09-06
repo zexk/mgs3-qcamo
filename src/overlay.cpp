@@ -355,6 +355,7 @@ void poll_menu(const std::vector<uint8_t>& uniforms)
     // way round it is pressed.
     bool keyboard = (GetAsyncKeyState(kHoldKey) & 0x8000) != 0;
     bool held = keyboard || (pad.shoulder && (open || pad.open_button));
+    bool requested = held;
     // Gating: the menu only exists during gameplay. While open, our own wheel
     // pause bit is tolerated; on the opening edge the game must be fully
     // unpaused so we never stack onto a game wheel or another pauser.
@@ -367,14 +368,18 @@ void poll_menu(const std::vector<uint8_t>& uniforms)
             menu_open = false;
             LOG_INFO("menu closed: %s", gate_name(block));
         }
-    } else if (held && !can_open_menu(base)) {
-        if (!logged_block) {
-            logged_block = true;
-            LOG_DEBUG("menu open blocked: %s", gate_name(gate_state(base, false)));
+    } else if (held) {
+        GateBlock block = gate_state(base, false);
+        if (block != GateBlock::None) {
+            if (!logged_block) {
+                logged_block = true;
+                if (block == GateBlock::Backpack) pending_sound = mgs3::kSoundDenied;
+                LOG_DEBUG("menu open blocked: %s", gate_name(block));
+            }
+            held = false;
         }
-        held = false;
     }
-    if (!held) {
+    if (!requested) {
         logged_block = false;
     }
     if (held != open) {

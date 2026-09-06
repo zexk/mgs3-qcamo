@@ -54,6 +54,13 @@ inline constexpr uint32_t kFaceAssetId = 0x0003A157;
 inline constexpr uint32_t kAreaCode = 0x24;
 inline constexpr uint32_t kAreaSize = 7;
 
+// Survival Viewer builds its disabled-entry mask at 0x311400. When bit 10 at
+// stats + 0x680 is clear it disables CAMOUFLAGE, BACKPACK, and CURE (mask
+// 0x0B). The game clears this while Snake has no backpack: before its first
+// pickup and after torture until his equipment is recovered.
+inline constexpr uint32_t kSurvivalFlags = 0x680;
+inline constexpr uint32_t kHasBackpack = 1 << 10;
+
 // Survival Viewer context slot: live pointer only while the Viewer screen exists.
 inline constexpr uint32_t kViewerSlot = 0x1E14AE0;
 
