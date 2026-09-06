@@ -11,10 +11,14 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
+#include <cfloat>
 #include <cstring>
+#include <string>
 #include <cstdint>
 #include <vector>
 
+#include "camo_index.h"
 #include "camo_swatch.h"
 #include "common/log.h"
 #include "gameplay_gate.h"
@@ -37,6 +41,8 @@ ID3D11RenderTargetView* render_target;
 uintptr_t base;
 uintptr_t inventory;
 QueueUniform queue_uniform;
+// The face paint every row is offered with, fixed while the menu is open.
+uint8_t paired_face;
 bool ready;
 bool open;
 int selected;
@@ -59,6 +65,14 @@ constexpr std::array kUniformNames = {
     "HORNET STRIPE", "SPIDER", "MOSS", "FIRE", "SPIRIT", "COLD WAR", "SNAKE",
     "GA-KO", "DESERT TIGER", "DPM", "FLECKTARN", "AUSCAM", "ANIMALS", "FLY",
     "BANANA", "DOWNLOADED",
+};
+
+// Face paints, in the order the game's own camouflage records list them.
+constexpr std::array kFaceNames = {
+    "NO PAINT", "WOODLAND", "BLACK", "WATER", "MOUNTAIN", "SPLITTER", "SNOW",
+    "KABUKI", "ZOMBIE", "OYAMA", "MASK", "GREEN", "BROWN", "INFINITY",
+    "SOVIET UNION", "UK", "FRANCE", "GERMANY", "ITALY", "SPAIN", "SWEDEN",
+    "JAPAN", "USA",
 };
 
 bool pressed(int key)
@@ -210,7 +224,16 @@ uintptr_t find_inventory()
     return found;
 }
 
-std::vector<uint8_t> owned_uniforms()
+// Uniforms and face paints are consecutive runs of 80-byte inventory entries;
+// capacity of at least one means owned. The game's own tables call these items
+// 41..73 and 74..96, but this table is indexed one lower throughout, so the
+// runs start at 40 and 73. Uniforms are 33 entries, which is what puts the
+// face run where it is.
+constexpr int kFirstUniformEntry = 40;
+constexpr int kFirstFaceEntry = kFirstUniformEntry + int(kUniformNames.size());
+static_assert(kFirstFaceEntry == 73);
+
+std::vector<uint8_t> owned_items(size_t count, int first_item)
 {
     static uint64_t retry_at;
     uint64_t now = GetTickCount64();
@@ -220,22 +243,87 @@ std::vector<uint8_t> owned_uniforms()
         if (inventory) LOG_INFO("inventory table found after startup");
     }
     std::vector<uint8_t> result;
-    if (inventory) {
-        for (uint8_t id = 0; id < kUniformNames.size(); ++id) {
-            auto entry = inventory + (40 + id) * 80;
-            if (mem::range_readable(entry, sizeof(int16_t)) && mem::read<int16_t>(entry) >= 1) {
-                result.push_back(id);
-            }
+    if (!inventory) return result;
+    for (uint8_t id = 0; id < count; ++id) {
+        auto entry = inventory + (first_item + id) * 80;
+        if (mem::range_readable(entry, sizeof(int16_t)) && mem::read<int16_t>(entry) >= 1) {
+            result.push_back(id);
         }
     }
+    return result;
+}
+
+std::vector<uint8_t> owned_uniforms()
+{
+    auto result = owned_items(kUniformNames.size(), kFirstUniformEntry);
     if (result.empty()) result = {0, 1};
     return result;
+}
+
+// Bare skin always counts, so the list is never empty and the pairing always
+// has something to offer.
+std::vector<uint8_t> owned_faces()
+{
+    auto result = owned_items(kFaceNames.size(), kFirstFaceEntry);
+    if (result.empty() || result.front() != 0) result.insert(result.begin(), 0);
+    // Logged whenever the set changes: a wrong entry offset shows up here as
+    // names that do not match what the Survival Viewer lists.
+    static std::vector<uint8_t> logged;
+    if (result != logged) {
+        logged = result;
+        std::string names;
+        for (uint8_t face : result) {
+            names += kFaceNames[face];
+            names += ' ';
+        }
+        LOG_INFO("face paints owned: %s", names.c_str());
+    }
+    return result;
+}
+
+// Face paint scores independently of the uniform, so one face is best for
+// every row and the best pairing needs no search.
+uint8_t best_face(int slot)
+{
+    uint8_t best = 0;
+    int best_value = face_value(base, slot, 0);
+    for (uint8_t face : owned_faces()) {
+        int value = face_value(base, slot, face);
+        if (value > best_value) {
+            best_value = value;
+            best = face;
+        }
+    }
+    return best;
+}
+
+// The rows the menu shows, best camouflage first. Rebuilt while the menu is
+// closed and frozen while it is open, so the row under the cursor cannot move
+// as Snake's footing changes.
+const std::vector<uint8_t>& menu_uniforms()
+{
+    static std::vector<uint8_t> rows;
+    if (!open) {
+        rows = owned_uniforms();
+        int slot = camo_slot(base);
+        std::stable_sort(rows.begin(), rows.end(), [slot](uint8_t a, uint8_t b) {
+            return camo_value(base, slot, a) > camo_value(base, slot, b);
+        });
+        paired_face = best_face(slot);
+    }
+    return rows;
 }
 
 uint8_t equipped_uniform()
 {
     auto stats = mem::read<uintptr_t>(base + mgs3::kStatsSlot);
     return stats ? mem::read<uint8_t>(stats + mgs3::kEquippedUniform) : 0;
+}
+
+uint8_t equipped_face()
+{
+    auto stats = mem::read<uintptr_t>(base + mgs3::kStatsSlot);
+    return stats ? mem::read<uint8_t>(stats + mgs3::kEquippedFace) : 0;
 }
 
 // G stands in for holding L1 on a pad. Every other key near the movement hand
@@ -294,10 +382,9 @@ void poll_menu(const std::vector<uint8_t>& uniforms)
         open = held;
         menu_open = open;
         LOG_INFO("menu %s by %s", open ? "opened" : "closed", keyboard ? "keyboard" : "pad");
-        if (open) {
-            auto it = std::find(uniforms.begin(), uniforms.end(), equipped_uniform());
-            selected = it == uniforms.end() ? 0 : static_cast<int>(it - uniforms.begin());
-        }
+        // Rows are sorted best camouflage first, so opening on row 0 puts the
+        // cursor on the best swap available rather than on what Snake has on.
+        if (open) selected = 0;
     }
     if (!open || uniforms.empty()) return;
     int count = static_cast<int>(uniforms.size());
@@ -312,7 +399,7 @@ void poll_menu(const std::vector<uint8_t>& uniforms)
         LOG_INFO("menu selected uniform %u", uniforms[selected]);
     }
     // Equipping leaves the menu up; releasing the hold is what closes it.
-    if (pressed(VK_RETURN) || pad_equip) queue_uniform(uniforms[selected]);
+    if (pressed(VK_RETURN) || pad_equip) queue_uniform(uniforms[selected], paired_face);
 }
 
 void draw_menu(const std::vector<uint8_t>& uniforms)
@@ -330,13 +417,17 @@ void draw_menu(const std::vector<uint8_t>& uniforms)
             draw->AddText(nullptr, height, position, color, value);
         }
     };
+    auto text_width = [hud](const char* value, float height) {
+        return hud ? hud_text_width(value, height)
+                   : ImGui::GetFont()->CalcTextSizeA(height, FLT_MAX, 0.0f, value).x;
+    };
 
     float font_height = 20 * std::max(1.0f, std::round(scale));
     float pad = 6 * scale;
     float header_height = font_height;
     float hint_height = font_height;
     float row_height = 34 * scale;
-    float width = 330 * scale;
+    float width = 560 * scale;
     int count = static_cast<int>(uniforms.size());
     int visible = std::min(count, 8);
     float height = 4 * pad + header_height + visible * row_height + hint_height;
@@ -352,23 +443,26 @@ void draw_menu(const std::vector<uint8_t>& uniforms)
     float top = y + 2 * pad + header_height;
     int first = std::clamp(selected - 3, 0, count - visible);
     uint8_t equipped = equipped_uniform();
+    int slot = camo_slot(base);
     for (int row = 0; row < visible; ++row) {
         int index = first + row;
         uint8_t id = uniforms[index];
         bool active = index == selected;
         // The HUD inverts the row Snake is wearing: olive on black rather than
         // black on olive, dim normally and bright under the cursor.
-        bool worn = id == equipped;
+        bool worn = id == equipped && paired_face == equipped_face();
         ImU32 worn_ink = active ? kRowSelected : kRowWornText;
         ImVec2 row_min{inner, top + row * row_height};
         ImVec2 row_max{inner + inner_width, row_min.y + row_height - 3 * scale};
         draw->AddRectFilled(row_min, row_max,
                             worn ? kRowWorn : active ? kRowSelected : kRow);
         if (worn) draw->AddRect(row_min, row_max, worn_ink, 0.0f, 0, scale);
+        // A row is a set, so it carries both swatches: the uniform first, then
+        // the face paint, in the order they read in the label beside them.
         float patch_height = row_max.y - row_min.y - 8 * scale;
+        float patch_width = patch_height * kSwatchAspect;
         ImVec2 patch_min{row_min.x + 5 * scale, row_min.y + 4 * scale};
-        ImVec2 patch_max{patch_min.x + patch_height * kSwatchAspect,
-                         patch_min.y + patch_height};
+        ImVec2 patch_max{patch_min.x + patch_width, patch_min.y + patch_height};
         if (auto* texture = camo_swatch(device, id)) {
             draw->AddImage(reinterpret_cast<ImTextureID>(texture), patch_min, patch_max);
         } else {
@@ -376,10 +470,32 @@ void draw_menu(const std::vector<uint8_t>& uniforms)
                                 IM_COL32(70 + (id * 37) % 100, 66 + (id * 19) % 85,
                                          42 + (id * 29) % 70, 255));
         }
+        patch_min.x = patch_max.x + 4 * scale;
+        patch_max.x = patch_min.x + patch_width;
+        if (auto* texture = face_swatch(device, paired_face)) {
+            draw->AddImage(reinterpret_cast<ImTextureID>(texture), patch_min, patch_max);
+        } else {
+            draw->AddRect(patch_min, patch_max, kHint, 0.0f, 0, scale);
+        }
         float label_height = font_height;
-        text({patch_max.x + 10 * scale,
-              row_min.y + (row_max.y - row_min.y - label_height) * 0.5f},
-             label_height, worn ? worn_ink : kRowText, kUniformNames[id]);
+        float label_y = row_min.y + (row_max.y - row_min.y - label_height) * 0.5f;
+        ImU32 ink = worn ? worn_ink : kRowText;
+        // A row is a whole set: this uniform worn with the face paint that
+        // scores best here, since face paint scores the same whatever the
+        // uniform.
+        char pair[64];
+        std::snprintf(pair, sizeof(pair), "%s / %s", kUniformNames[id], kFaceNames[paired_face]);
+        text({patch_max.x + 10 * scale, label_y}, label_height, ink, pair);
+        if (slot < 0) continue;
+        // What swapping to the set would gain or lose. The absolute percentage
+        // is already on the HUD, so only the difference is worth the row.
+        int delta = camo_value(base, slot, id) + face_value(base, slot, paired_face) -
+                    camo_value(base, slot, equipped) - face_value(base, slot, equipped_face());
+        if (delta == 0) continue;
+        char change[8];
+        std::snprintf(change, sizeof(change), "%+d", delta / 10);
+        text({row_max.x - 8 * scale - text_width(change, label_height), label_y}, label_height,
+             ink, change);
     }
     float hint_y = top + visible * row_height + pad;
     if (!hud) {
@@ -437,7 +553,7 @@ bool init_renderer(IDXGISwapChain* swap_chain)
 HRESULT STDMETHODCALLTYPE present_hook(IDXGISwapChain* swap_chain, UINT interval, UINT flags)
 {
     if (!ready && !init_renderer(swap_chain)) return original_present(swap_chain, interval, flags);
-    auto uniforms = owned_uniforms();
+    const auto& uniforms = menu_uniforms();
     poll_menu(uniforms);
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();

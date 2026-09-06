@@ -25,6 +25,7 @@ bool applying;
 constexpr uint64_t kSettleMs = 2500;
 
 std::atomic_int pending_uniform{-1};
+std::atomic_int pending_face{-1};
 std::atomic_uint64_t settle_until;
 std::atomic_bool change_busy;
 bool menu_paused;
@@ -129,7 +130,7 @@ void* load_asset(uint32_t type, int id)
     return queue;
 }
 
-void change_camo(uint8_t next)
+void change_camo(uint8_t next, uint8_t next_face)
 {
     auto stats = qcamo::mem::read<uintptr_t>(image_base + qcamo::mgs3::kStatsSlot);
     auto player = qcamo::mem::read<void*>(image_base + qcamo::mgs3::kPlayerSlot);
@@ -150,16 +151,17 @@ void change_camo(uint8_t next)
 
     auto address = stats + qcamo::mgs3::kEquippedUniform;
     uint8_t current = qcamo::mem::read<uint8_t>(address);
-    if (current == next) {
-        LOG_INFO("uniform %u already equipped", current);
+    uint8_t current_face = qcamo::mem::read<uint8_t>(stats + qcamo::mgs3::kEquippedFace);
+    if (current == next && current_face == next_face) {
+        LOG_INFO("uniform %u and face %u already equipped", current, current_face);
         change_busy = false;
         return;
     }
     settle_until = GetTickCount64() + kSettleMs;
-    uint8_t face = qcamo::mem::read<uint8_t>(stats + qcamo::mgs3::kEquippedFace);
     int id = game_function<int(__fastcall*)(uint32_t, int)>(
         qcamo::mgs3::kUniformAssetId)(qcamo::mgs3::kUniformAssetType, next);
-    LOG_INFO("uniform %u -> %u; loading asset %08X", current, next, id);
+    LOG_INFO("uniform %u -> %u, face %u -> %u; loading asset %08X", current, next,
+             current_face, next_face, id);
     // Load before committing. 1A0001 starts a change the game expects to be
     // finished by 1A0002 with a real asset; sending the begin and then failing
     // to load leaves the player mid-change and wedges the next attempt. An
@@ -182,12 +184,12 @@ void change_camo(uint8_t next)
     qcamo::mem::write<uint8_t>(stats + qcamo::mgs3::kEquippedFace, 0);
     send_player(qcamo::mgs3::kBeginFaceChange);
     int face_id = game_function<int(__fastcall*)(uint32_t, int)>(
-        qcamo::mgs3::kUniformAssetId)(qcamo::mgs3::kFaceAssetType, face);
+        qcamo::mgs3::kUniformAssetId)(qcamo::mgs3::kFaceAssetType, next_face);
     if (!load_asset(qcamo::mgs3::kFaceAssetType, face_id)) {
         LOG_ERROR("change stopped: face asset unavailable");
         return;
     }
-    qcamo::mem::write<uint8_t>(stats + qcamo::mgs3::kEquippedFace, face);
+    qcamo::mem::write<uint8_t>(stats + qcamo::mgs3::kEquippedFace, next_face);
     game_function<void(__fastcall*)()>(qcamo::mgs3::kRefreshEquipment)();
     auto face_asset = game_function<void*(__fastcall*)(uint32_t)>(
         qcamo::mgs3::kFindAsset)(qcamo::mgs3::kFaceAsset);
@@ -198,7 +200,8 @@ void change_camo(uint8_t next)
             qcamo::mgs3::kApplyFace)(qcamo::mgs3::kFaceAssetSlot,
                                      qcamo::mgs3::kFaceAssetId, prepared);
     }
-    LOG_INFO("uniform %u -> %u applied; settling", current, next);
+    LOG_INFO("uniform %u -> %u, face %u -> %u applied; settling", current, next,
+             current_face, next_face);
 }
 
 intptr_t __fastcall dispatch_hook(void* target, uint32_t message, void* data)
@@ -233,7 +236,8 @@ intptr_t __fastcall dispatch_hook(void* target, uint32_t message, void* data)
         } else if (!settle_until) {
             int requested = pending_uniform.exchange(-1);
             if (requested >= 0) {
-                change_camo(static_cast<uint8_t>(requested));
+                change_camo(static_cast<uint8_t>(requested),
+                            static_cast<uint8_t>(pending_face.exchange(-1)));
             }
         }
         applying = false;
@@ -257,7 +261,7 @@ void set_menu_pause(bool pause_menu)
     LOG_INFO("wheel pause %s", pause_menu ? "set" : "cleared");
 }
 
-bool queue_uniform(uint8_t uniform)
+bool queue_uniform(uint8_t uniform, uint8_t face)
 {
     // Equips come from the open menu, which holds our own wheel pause; F6
     // comes with the menu closed and must find the game fully unpaused so a
@@ -265,15 +269,16 @@ bool queue_uniform(uint8_t uniform)
     bool from_menu = qcamo::menu_open.load();
     if (qcamo::GateBlock block = qcamo::gate_state(image_base, from_menu);
         block != qcamo::GateBlock::None) {
-        LOG_INFO("uniform %u ignored: %s", uniform, qcamo::gate_name(block));
+        LOG_INFO("uniform %u face %u ignored: %s", uniform, face, qcamo::gate_name(block));
         return false;
     }
     if (change_busy.exchange(true)) {
-        LOG_INFO("uniform %u ignored: change gate active", uniform);
+        LOG_INFO("uniform %u face %u ignored: change gate active", uniform, face);
         return false;
     }
+    pending_face = face;
     pending_uniform = uniform;
-    LOG_INFO("uniform %u queued", uniform);
+    LOG_INFO("uniform %u face %u queued", uniform, face);
     return true;
 }
 
@@ -283,6 +288,12 @@ uint8_t toggle_target()
     uint8_t current =
         stats ? qcamo::mem::read<uint8_t>(stats + qcamo::mgs3::kEquippedUniform) : 0;
     return current == 0 ? 1 : 0;
+}
+
+uint8_t equipped_face()
+{
+    auto stats = qcamo::mem::read<uintptr_t>(image_base + qcamo::mgs3::kStatsSlot);
+    return stats ? qcamo::mem::read<uint8_t>(stats + qcamo::mgs3::kEquippedFace) : 0;
 }
 
 std::filesystem::path own_dir()
@@ -327,7 +338,7 @@ DWORD WINAPI init(LPVOID)
     for (;;) {
         bool down = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
         if (down && !held) {
-            queue_uniform(toggle_target());
+            queue_uniform(toggle_target(), equipped_face());
         }
         held = down;
         // Area watcher. This thread keeps running when the gameplay thread

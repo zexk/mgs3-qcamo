@@ -57,17 +57,49 @@ constexpr std::array kIcons = {
     "00050da5", // download
 };
 
+// Face paint icons, read straight out of the game's own table of them at RVA
+// 0x8ED380: twenty-three ids in equipped-face order. They are 128x64 tiles in
+// the same flatlist as the uniform icons.
+constexpr std::array kFaceIcons = {
+    "000a365b", // no paint
+    "0042367f", // woodland
+    "00e9362a", // black
+    "0092367d", // water
+    "00113632", // mountain
+    "006a366f", // splitter
+    "002d366f", // snow
+    "0080364d", // kabuki
+    "0000368b", // zombie
+    "008b3660", // oyama
+    "00c93657", // mask
+    "00ac363f", // green
+    "00ac362b", // brown
+    "004c3656", // infinity
+    "0011366c", // soviet union
+    "008dab1c", // united kingdom
+    "00a3363b", // france
+    "0010363e", // germany
+    "00df3647", // italy
+    "005f366f", // spain
+    "00433670", // sweden
+    "006c364b", // japan
+    "00bf3677", // usa
+};
+
 std::array<ID3D11ShaderResourceView*, kIcons.size()> views;
 std::array<bool, kIcons.size()> resolved;
+std::array<ID3D11ShaderResourceView*, kFaceIcons.size()> face_views;
+std::array<bool, kFaceIcons.size()> face_resolved;
 
-ID3D11ShaderResourceView* load(ID3D11Device* device, const char* icon)
+ID3D11ShaderResourceView* load(ID3D11Device* device, const char* icon, bool tiling)
 {
     Image image = load_ctxr(std::filesystem::path("textures") / "flatlist" / "_win" /
                             (std::string(icon) + ".ctxr"));
     if (!image) return nullptr;
-    // The icons tile seamlessly, so a centred band of the right shape shows the
-    // pattern without stretching it.
-    int band = image.height * kHeight / kWidth;
+    // Uniform icons tile seamlessly, so a centred band of the right shape shows
+    // the pattern without stretching it. Face icons are portraits already at
+    // the swatch shape, so they are taken whole.
+    int band = tiling ? image.height * kHeight / kWidth : image.height;
     int top = (image.height - band) / 2;
     std::vector<uint8_t> swatch(size_t(kWidth) * kHeight * 4);
     bool visible = false;
@@ -96,9 +128,19 @@ ID3D11ShaderResourceView* camo_swatch(ID3D11Device* device, uint8_t uniform)
     if (uniform >= kIcons.size()) return nullptr;
     if (!resolved[uniform]) {
         resolved[uniform] = true;
-        views[uniform] = load(device, kIcons[uniform]);
+        views[uniform] = load(device, kIcons[uniform], true);
     }
     return views[uniform];
+}
+
+ID3D11ShaderResourceView* face_swatch(ID3D11Device* device, uint8_t face)
+{
+    if (face >= kFaceIcons.size()) return nullptr;
+    if (!face_resolved[face]) {
+        face_resolved[face] = true;
+        face_views[face] = load(device, kFaceIcons[face], false);
+    }
+    return face_views[face];
 }
 
 } // namespace qcamo
