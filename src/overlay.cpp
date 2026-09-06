@@ -46,6 +46,7 @@ QueueUniform queue_uniform;
 uint8_t paired_face;
 bool ready;
 bool open;
+bool rows_dirty;
 int selected;
 
 // Sampled from the game's own Survival Viewer and equipment HUD.
@@ -234,8 +235,6 @@ static_assert(kFirstFaceEntry == 73);
 
 std::vector<uint8_t> owned_uniform_cache{0, 1};
 std::vector<uint8_t> owned_face_cache{0};
-uint64_t inventory_revision;
-uint64_t inventory_refresh_at;
 
 std::vector<uint8_t> owned_items(size_t count, int first_item)
 {
@@ -254,11 +253,6 @@ std::vector<uint8_t> owned_items(size_t count, int first_item)
 
 void refresh_owned_items()
 {
-    uint64_t now = GetTickCount64();
-    if (now < inventory_refresh_at) return;
-    // ponytail: one-second polling; hook inventory writes only if pickup latency matters.
-    inventory_refresh_at = now + 1000;
-
     auto uniforms = owned_items(kUniformNames.size(), kFirstUniformEntry);
     if (uniforms.empty()) uniforms = {0, 1};
     auto faces = owned_items(kFaceNames.size(), kFirstFaceEntry);
@@ -266,7 +260,6 @@ void refresh_owned_items()
     if (uniforms != owned_uniform_cache || faces != owned_face_cache) {
         owned_uniform_cache = std::move(uniforms);
         owned_face_cache = std::move(faces);
-        ++inventory_revision;
         std::string names;
         for (uint8_t face : owned_face_cache) {
             names += kFaceNames[face];
@@ -292,30 +285,25 @@ uint8_t best_face(int slot)
     return best;
 }
 
-// The rows the menu shows, best camouflage first. Rebuilt while the menu is
-// closed and frozen while it is open, so the row under the cursor cannot move
-// as Snake's footing changes.
+// The rows the menu shows, best camouflage first. Rebuilt once when the menu
+// opens and then frozen, so closed gameplay does no ranking work and the row
+// under the cursor cannot move as Snake's footing changes.
 const std::vector<uint8_t>& menu_uniforms()
 {
     static std::vector<uint8_t> rows;
-    if (!open) {
-        static uint64_t rows_revision = UINT64_MAX;
-        static int previous_slot = -2;
+    if (rows_dirty) {
         refresh_owned_items();
         int slot = camo_slot(base);
-        if (slot != previous_slot || rows_revision != inventory_revision) {
-            rows = owned_uniform_cache;
-            std::array<int, kUniformNames.size()> scores{};
-            for (uint8_t uniform_id : rows) {
-                scores[uniform_id] = camo_value(base, slot, uniform_id);
-            }
-            std::stable_sort(rows.begin(), rows.end(), [&scores](uint8_t a, uint8_t b) {
-                return scores[a] > scores[b];
-            });
-            paired_face = best_face(slot);
-            previous_slot = slot;
-            rows_revision = inventory_revision;
+        rows = owned_uniform_cache;
+        std::array<int, kUniformNames.size()> scores{};
+        for (uint8_t uniform_id : rows) {
+            scores[uniform_id] = camo_value(base, slot, uniform_id);
         }
+        std::stable_sort(rows.begin(), rows.end(), [&scores](uint8_t a, uint8_t b) {
+            return scores[a] > scores[b];
+        });
+        paired_face = best_face(slot);
+        rows_dirty = false;
     }
     return rows;
 }
@@ -340,7 +328,7 @@ uint8_t equipped_face()
 // are the natural reach for a hand already on the movement keys.
 constexpr int kHoldKey = 'G';
 
-void poll_menu(const std::vector<uint8_t>& uniforms)
+void poll_menu()
 {
     Pad pad = read_pad();
     static Pad previous;
@@ -390,9 +378,14 @@ void poll_menu(const std::vector<uint8_t>& uniforms)
         pending_sound = open ? mgs3::kSoundOpen : mgs3::kSoundCancel;
         // Rows are sorted best camouflage first, so opening on row 0 puts the
         // cursor on the best swap available rather than on what Snake has on.
-        if (open) selected = 0;
+        if (open) {
+            selected = 0;
+            rows_dirty = true;
+        }
     }
-    if (!open || uniforms.empty()) return;
+    if (!open) return;
+    const auto& uniforms = menu_uniforms();
+    if (uniforms.empty()) return;
     int count = static_cast<int>(uniforms.size());
     bool up = pressed_any(VK_UP, 'W');
     bool down = pressed_any(VK_DOWN, 'S');
@@ -590,8 +583,9 @@ HRESULT STDMETHODCALLTYPE present_hook(IDXGISwapChain* swap_chain, UINT interval
         (ready && !render_target && !create_render_target(swap_chain))) {
         return original_present(swap_chain, interval, flags);
     }
+    poll_menu();
+    if (!open) return original_present(swap_chain, interval, flags);
     const auto& uniforms = menu_uniforms();
-    poll_menu(uniforms);
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
@@ -687,7 +681,6 @@ bool start_overlay(uintptr_t image_base, QueueUniform callback)
     base = image_base;
     queue_uniform = callback;
     refresh_inventory();
-    refresh_owned_items();
     if (!inventory.load()) LOG_INFO("inventory table not found; using POC uniforms");
     return install_hooks();
 }
