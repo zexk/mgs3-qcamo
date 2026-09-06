@@ -215,42 +215,45 @@ menu navigates on the D-pad only.
 ## Face paint assets
 
 Face paint ids follow the `FACE/...` string block that runs straight on from the
-uniform names in `METAL GEAR SOLID3.exe`, at file offset `0x8D0CF0`: no paint,
-woodland, black, water, desert, splitter, snow, kabuki, zombie, oyama, mask,
-green, brown, infinity, then the nationals in the order soviet union, united
-kingdom, france, germany, italy, spain, sweden, japan, usa. Twenty-three ids for
-the twenty-three `sp/slot/facepaint-*` slots.
+uniform names in `METAL GEAR SOLID3.exe`, at file offset `0x8D0CF0`. The game's
+own camouflage records name all twenty-three, in equipped-face order: no paint,
+woodland, black, water, mountain, splitter, snow, kabuki, zombie, oyama, mask,
+green, brown, infinity, then the nationals soviet union, united kingdom, france,
+germany, italy, spain, sweden, japan, usa. One per `sp/slot/facepaint-*` slot.
 
 The Survival Viewer has its own face paint thumbnails, so the face textures are
 not the thing to draw. They are 128x64 tiles in `textures/flatlist/_win`, named
-by asset id like the uniform icons but at half the height. Confirmed by their
-artwork:
+by asset id like the uniform icons but at half the height, and the game keeps
+the whole list of them at RVA `0x8ED380`: twenty-three consecutive dwords in
+equipped-face order.
 
-| face paint | icon |
-| --- | --- |
-| kabuki | `0080364d` |
-| oyama | `00c93657` |
-| infinity | `004c3656` |
-| zombie | `00ac966f` |
-| soviet union | `0011366c` |
-| united kingdom | `008dab1c` |
-| france | `00a3363b` |
-| germany | `0010363e` |
-| italy | `00df3647` |
-| spain | `005f366f` |
-| japan | `006c364b` |
-| usa | `00bf3677` |
+| face paint | icon | | face paint | icon |
+| --- | --- | --- | --- | --- |
+| no paint | `000a365b` | | brown | `00ac362b` |
+| woodland | `0042367f` | | infinity | `004c3656` |
+| black | `00e9362a` | | soviet union | `0011366c` |
+| water | `0092367d` | | united kingdom | `008dab1c` |
+| mountain | `00113632` | | france | `00a3363b` |
+| splitter | `006a366f` | | germany | `0010363e` |
+| snow | `002d366f` | | italy | `00df3647` |
+| kabuki | `0080364d` | | spain | `005f366f` |
+| zombie | `0000368b` | | sweden | `00433670` |
+| oyama | `008b3660` | | japan | `006c364b` |
+| mask | `00c93657` | | usa | `00bf3677` |
+| green | `00ac363f` | | | |
 
-Still unidentified: no paint, woodland, black, water, desert, splitter, snow,
-green, brown, mask and sweden. Their icons are plain painted patterns that are
-easy to confuse with the camouflage item icons sharing the same size, and
-colour matching against the face textures does not separate them, because the
-tiles are flat artwork while the faces are shaded.
+Twelve of these had been identified by eye first, and nine of the twelve landed
+on their own index in this table, which is what confirms the ordering. The other
+three say what artwork matching costs: `00c93657` was read as oyama and is
+really mask, and the id read as zombie, `00ac966f`, is not a face icon at all.
+It belongs to the second block of uniform icons described below.
 
-What does help is removing the tiles that merely repeat a uniform icon at
-128x64. Comparing each tile against the thirty-three known uniform icons finds
-exact duplicates, which caught two wrong guesses: `0030965f` is Olive Drab, not
-a green face paint, and `00fe965a` is the Naked uniform, not the unpainted face.
+There is a uniform icon table too, at RVA `0x8EDCD0`, followed at `0x8EDD60` by
+a second block of the same uniforms at 128x64. Neither matches the uniform icon
+list in `camo_swatch.cpp` index for index -- ten of thirty-three differ, and the
+order looks like Viewer display order rather than equipped-uniform order. The
+list drawn from artwork is correct on screen, so it was left alone, but that
+table is where to look if a uniform swatch ever comes out wrong.
 
 The per-slot manifests are still useful for the face textures themselves. Each
 `facepaint-*` slot lists exactly one, mostly `0003a157.img_<hash>.ctxr` where
@@ -363,6 +366,65 @@ disk decodes as garbage. Disassemble from `/proc/<pid>/mem` at the module base
 found in `/proc/<pid>/maps` instead. Anything the mod hooks reads back as a
 MinHook `jmp` in the first five bytes, so re-align a few bytes earlier when a
 function entry looks wrong.
+
+## Camouflage index
+
+The index the HUD shows lives at `0x1E16CF4`, in tenths of a percent, so `1000`
+is 100%. That is the player record at `kPlayerSlot` (`0x1E16CD0`), which is
+0x80 bytes: `+0x24` is the index and `+0x28` the state bitset. `0xA8070`
+computes it and `0x358CEB` stores it.
+
+It is a sum of independent terms:
+
+    index = uniform_value * 10 + face_value * 10 + movement_penalty + light
+
+Only the first term depends on the uniform and only the second on the face
+paint, and neither depends on the other. So ranking uniforms is exact, the
+difference between two of them is exact, and the best pairing needs no search:
+it is the best uniform together with the best face paint.
+
+Values come from one 0x18-byte record per uniform at `0x1E216E0` and per face
+paint at `0x1E214A0`, indexed by the equipped byte. `+0x00` is the internal
+name, `+0x08` the value table. A uniform's table is 27 terrains of 5 postures,
+signed bytes, plus an `0xFF` terminator; a face paint's is one byte per terrain.
+
+The posture, and which surface it is read against, follow the state bits
+`0x359020` queries -- that function is only `(bitset[bit / 32] >> (bit % 32)) & 1`
+against `0x1E16CF8`.
+
+| condition | surface | slot |
+| --- | --- | --- |
+| bit `0x3B`, on a wall | wall material | 3, or 4 crouched |
+| prone: bit `3` and not bit `0xA9` | ground material | 2 |
+| crouched: bit `2` | ground material | 1 |
+| otherwise | ground material | 0 |
+
+The two surface materials are republished every frame at `0x1D38AF8` (ground)
+and `0x1D38AFC` (wall). `0xA88F0` maps a material to a dense terrain index by
+scanning the table at `0x1D38B10`, whose entry count is at `0x1D38F10`: 8-byte
+entries of an int key and a uint16 value, with a zero key acting as the
+fallback. On a miss it calls back into game code, so the mod reimplements the
+scan read-only rather than calling it from the render thread, and treats a miss
+as no data.
+
+Worked example, verified live: equipped uniform 0, ground material `4315316`,
+standing. The material maps to terrain 11, so the slot is `11 * 5 + 0 = 55`;
+Olive Drab's table holds `0x0F` there; `15 * 10 = 150`, and `0x1E16CF4` read
+150.
+
+## Uniform and face paint inventory
+
+`0x9BA40` maps an equipped-uniform byte to an item id and `0x9BA70` does the
+same for face paints: uniforms are items 41..73 and face paints 74..96, both
+8-byte key/value pairs in tables at `0x8D1DB0` and `0x8D1CF0`. Item records
+themselves are 0x50 bytes at `0x1D30B08`, with the item's own id at `+0x20` --
+which is what `0x9BBE0` returns -- and its asset id at `+0x2C`.
+
+The ownership table the mod finds by signature is a different table with the
+same 0x50 stride, and it is indexed one lower than those item ids: uniforms
+start at entry 40 and face paints at entry 73. Capacity of at least one means
+owned. Getting this wrong by one shifts every entry onto its neighbour's
+ownership, which reads as unlocked camouflage appearing in the menu.
 
 ## External references
 

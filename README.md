@@ -4,9 +4,16 @@ Proof of concept for changing camouflage during gameplay in the PC Master
 Collection release of Metal Gear Solid 3.
 
 Hold `G` during gameplay to bring up the quick menu. `W`/`S` or Up/Down select
-an owned uniform, Enter equips it, and releasing `G` closes the menu without
-changing anything. `F6` remains a test shortcut which toggles Olive Drab and Tiger
+a row, Enter equips it, and releasing `G` closes the menu without changing
+anything. `F6` remains a test shortcut which toggles Olive Drab and Tiger
 Stripe.
+
+Each row is a whole set: an owned uniform together with the face paint that
+scores best where Snake stands, and what equipping the pair would add to or
+take off his camouflage index. Rows are sorted best first, so the cursor opens
+on the best set available. Face paint scores independently of the uniform in
+the game's own arithmetic, so the same face paint is right for every row and
+the top row really is the best pairing, not a guess at one.
 
 On a pad, triangle plus L1 opens the menu in either order, L1 alone keeps it
 up, the D-pad moves the selection, cross equips, and releasing L1 closes. Every
@@ -68,7 +75,7 @@ dispatches, which is only correct inside the Viewer; during gameplay it left
 the allocator pointing at the wrong arena and the next stage load never
 finished. It now restores the value that was there.
 
-Next work: camouflage-score comparisons, face-paint combinations, and freezing
-gameplay while the menu is open.
+Next work: freezing gameplay while the menu is open, and the final input
+scheme.
 
 See [docs/research.md](docs/research.md) for verified game protocol.
