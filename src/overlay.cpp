@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <cstdint>
 #include <vector>
 
@@ -65,6 +66,138 @@ bool pressed(int key)
     bool result = down && !held[key];
     held[key] = down;
     return result;
+}
+
+// The pad reaches this process only through Steam Input: the game imports no
+// input API, and XInput, winmm and DirectInput all enumerate nothing while
+// Steam holds the device. The game drives Steam Input through the C++
+// interface, so its action names are the contract here; they were read back
+// with GetStringForDigitalActionName off the handles it polls.
+struct Pad {
+    bool present;
+    bool shoulder; // L1
+    bool open_button; // triangle
+    bool equip; // cross
+    bool up;
+    bool down;
+};
+
+// GetDigitalActionData returns two bytes, state then active, packed into the
+// flat wrapper's return value.
+using DigitalDataFn = uint16_t (*)(void*, uint64_t, uint64_t);
+using ActionHandleFn = uint64_t (*)(void*, const char*);
+using ConnectedFn = int (*)(void*, uint64_t*);
+
+struct SteamPad {
+    void* self;
+    DigitalDataFn data;
+    uint64_t controller;
+    uint64_t triangle, cross, shoulder, up, down;
+};
+
+SteamPad steam_pad;
+
+bool open_pad()
+{
+    if (steam_pad.controller) return true;
+    static uint64_t retry_at;
+    uint64_t now = GetTickCount64();
+    if (now < retry_at) return false;
+    retry_at = now + 2000;
+
+    HMODULE steam = GetModuleHandleW(L"steam_api64.dll");
+    if (!steam) return false;
+    auto accessor = reinterpret_cast<void* (*)()>(
+        GetProcAddress(steam, "SteamAPI_SteamInput_v006"));
+    auto connected = reinterpret_cast<ConnectedFn>(
+        GetProcAddress(steam, "SteamAPI_ISteamInput_GetConnectedControllers"));
+    auto name_of = reinterpret_cast<const char* (*)(void*, uint64_t)>(
+        GetProcAddress(steam, "SteamAPI_ISteamInput_GetStringForDigitalActionName"));
+    steam_pad.data = reinterpret_cast<DigitalDataFn>(
+        GetProcAddress(steam, "SteamAPI_ISteamInput_GetDigitalActionData"));
+    steam_pad.self = accessor ? accessor() : nullptr;
+    if (!steam_pad.self || !connected || !name_of || !steam_pad.data) return false;
+
+    uint64_t handles[16]{};
+    if (connected(steam_pad.self, handles) < 1) return false;
+    uint64_t controller = handles[0];
+
+    // GetDigitalActionHandle wants the name from the game's action manifest,
+    // which is not on disk here. The handles themselves are small integers, and
+    // each one can report the button it stands for, so walk them and match.
+    const struct {
+        const char* name;
+        uint64_t* target;
+    } wanted[] = {
+        {"L1 Button", &steam_pad.shoulder}, {"Y Button", &steam_pad.triangle},
+        {"A Button", &steam_pad.cross},     {"Arrow Up", &steam_pad.up},
+        {"Arrow Down", &steam_pad.down},
+    };
+    for (uint64_t action = 1; action <= 64; ++action) {
+        const char* name = name_of(steam_pad.self, action);
+        if (!name || !*name) continue;
+        for (const auto& entry : wanted) {
+            if (std::strcmp(name, entry.name) == 0) *entry.target = action;
+        }
+    }
+    if (!steam_pad.shoulder || !steam_pad.triangle || !steam_pad.cross) {
+        LOG_WARN("steam input actions not found");
+        return false;
+    }
+    steam_pad.controller = controller;
+    LOG_INFO("pad ready through steam input: L1=%llu triangle=%llu cross=%llu up=%llu down=%llu",
+             static_cast<unsigned long long>(steam_pad.shoulder),
+             static_cast<unsigned long long>(steam_pad.triangle),
+             static_cast<unsigned long long>(steam_pad.cross),
+             static_cast<unsigned long long>(steam_pad.up),
+             static_cast<unsigned long long>(steam_pad.down));
+    return true;
+}
+
+Pad read_pad()
+{
+    Pad pad{};
+    if (!open_pad()) return pad;
+    // Low byte is the pressed state, high byte is whether the action belongs to
+    // the action set the game currently has active. A dead high byte means the
+    // handle is fine but the set is wrong, which no amount of pressing fixes.
+    struct Read {
+        uint64_t action;
+        bool* target;
+    };
+    const Read reads[] = {
+        {steam_pad.shoulder, &pad.shoulder}, {steam_pad.triangle, &pad.open_button},
+        {steam_pad.cross, &pad.equip},       {steam_pad.up, &pad.up},
+        {steam_pad.down, &pad.down},
+    };
+    uint32_t snapshot = 0;
+    for (int i = 0; i < 5; ++i) {
+        uint16_t value = reads[i].action
+                             ? steam_pad.data(steam_pad.self, steam_pad.controller,
+                                              reads[i].action)
+                             : 0;
+        *reads[i].target = (value & 0xFF) != 0;
+        snapshot |= static_cast<uint32_t>(value & 0x0101) << (i * 2);
+    }
+    pad.present = true;
+    static uint32_t traced = ~0u;
+    if (snapshot != traced) {
+        traced = snapshot;
+        LOG_DEBUG("pad state/active L1=%d/%d tri=%d/%d cross=%d/%d up=%d/%d down=%d/%d",
+                  pad.shoulder, (snapshot >> 1) & 1, pad.open_button, (snapshot >> 3) & 1,
+                  pad.equip, (snapshot >> 5) & 1, pad.up, (snapshot >> 7) & 1, pad.down,
+                  (snapshot >> 9) & 1);
+    }
+    return pad;
+}
+
+// Both keys are polled rather than short-circuited so that neither one's held
+// state goes stale.
+bool pressed_any(int first, int second)
+{
+    bool a = pressed(first);
+    bool b = pressed(second);
+    return a || b;
 }
 
 constexpr int wrapped(int selected, int count, int step)
@@ -128,33 +261,59 @@ uint8_t equipped_uniform()
     return stats ? mem::read<uint8_t>(stats + mgs3::kEquippedUniform) : 0;
 }
 
+// G stands in for holding L1 on a pad. Every other key near the movement hand
+// is taken: both keyboard layouts use E, N, O and Space, layout A adds F, H, M
+// and U, layout B adds C, Q, R and V. Enter stands in for cross, which is what
+// the game's own keyboard prompts show for it. W/S join the arrow keys for the
+// D-pad; they collide with movement until the menu freezes the game, but they
+// are the natural reach for a hand already on the movement keys.
+constexpr int kHoldKey = 'G';
+
 void poll_menu(const std::vector<uint8_t>& uniforms)
 {
-    if (pressed(VK_F7)) {
-        open = !open;
-        LOG_INFO("menu %s", open ? "opened" : "closed");
+    Pad pad = read_pad();
+    static Pad previous;
+    auto fresh = [&](bool Pad::*button) { return pad.*button && !(previous.*button); };
+    bool pad_up = fresh(&Pad::up);
+    bool pad_down = fresh(&Pad::down);
+    bool pad_equip = fresh(&Pad::equip);
+    previous = pad;
+
+    static bool pad_seen;
+    if (pad.present != pad_seen) {
+        pad_seen = pad.present;
+        LOG_INFO("pad %s", pad.present ? "detected" : "disconnected");
+    }
+
+    // Triangle plus L1 opens the menu and L1 alone keeps it up, because on a
+    // pad every button is already spoken for. G is the keyboard stand-in.
+    // Both are read as levels rather than edges so the chord opens whichever
+    // way round it is pressed.
+    bool keyboard = (GetAsyncKeyState(kHoldKey) & 0x8000) != 0;
+    bool held = keyboard || (pad.shoulder && (open || pad.open_button));
+    if (held != open) {
+        open = held;
+        menu_open = open;
+        LOG_INFO("menu %s by %s", open ? "opened" : "closed", keyboard ? "keyboard" : "pad");
         if (open) {
             auto it = std::find(uniforms.begin(), uniforms.end(), equipped_uniform());
             selected = it == uniforms.end() ? 0 : static_cast<int>(it - uniforms.begin());
         }
     }
     if (!open || uniforms.empty()) return;
-    if (pressed(VK_ESCAPE)) {
-        open = false;
-        return;
-    }
     int count = static_cast<int>(uniforms.size());
-    if (pressed(VK_UP)) {
+    bool up = pressed_any(VK_UP, 'W');
+    bool down = pressed_any(VK_DOWN, 'S');
+    if (up || pad_up) {
         selected = wrapped(selected, count, -1);
         LOG_INFO("menu selected uniform %u", uniforms[selected]);
     }
-    if (pressed(VK_DOWN)) {
+    if (down || pad_down) {
         selected = wrapped(selected, count, 1);
         LOG_INFO("menu selected uniform %u", uniforms[selected]);
     }
-    if (pressed(VK_RETURN)) {
-        if (queue_uniform(uniforms[selected])) open = false;
-    }
+    // Equipping leaves the menu up; releasing the hold is what closes it.
+    if (pressed(VK_RETURN) || pad_equip) queue_uniform(uniforms[selected]);
 }
 
 void draw_menu(const std::vector<uint8_t>& uniforms)
@@ -224,7 +383,7 @@ void draw_menu(const std::vector<uint8_t>& uniforms)
     }
     float hint_y = top + visible * row_height + pad;
     if (!hud) {
-        text({inner, hint_y}, hint_height, kHint, "UP/DOWN SELECT   ENTER EQUIP   ESC CLOSE");
+        text({inner, hint_y}, hint_height, kHint, "W/S SELECT   ENTER EQUIP   G HOLD");
         return;
     }
     float cursor = inner;
@@ -247,7 +406,7 @@ void draw_menu(const std::vector<uint8_t>& uniforms)
     label("EQUIP");
     hud_tile(draw, {cursor, hint_y}, hint_height, "L1");
     cursor += hud_tile_width("L1", hint_height) + 4 * scale;
-    label("CLOSE");
+    label("HOLD");
 }
 
 bool create_render_target(IDXGISwapChain* swap_chain)
@@ -346,6 +505,8 @@ bool install_hooks()
 }
 
 } // namespace
+
+std::atomic_bool menu_open;
 
 bool start_overlay(uintptr_t image_base, QueueUniform callback)
 {

@@ -19,6 +19,7 @@ bool applying;
 std::atomic_int pending_uniform{-1};
 std::atomic_uint64_t settle_until;
 std::atomic_bool change_busy;
+bool menu_paused;
 
 template <typename Function>
 Function game_function(uint32_t rva)
@@ -146,6 +147,22 @@ intptr_t __fastcall dispatch_hook(void* target, uint32_t message, void* data)
     return result;
 }
 
+void set_menu_pause(bool pause_menu)
+{
+    if (pause_menu == menu_paused) {
+        return;
+    }
+    auto& pause = *reinterpret_cast<uint32_t*>(image_base + qcamo::mgs3::kPauseLevel);
+    std::atomic_ref pause_level(pause);
+    if (pause_menu) {
+        pause_level.fetch_or(qcamo::mgs3::kWheelPause);
+    } else {
+        pause_level.fetch_and(~qcamo::mgs3::kWheelPause);
+    }
+    menu_paused = pause_menu;
+    LOG_INFO("wheel pause %s", pause_menu ? "set" : "cleared");
+}
+
 bool queue_uniform(uint8_t uniform)
 {
     if (change_busy.exchange(true)) {
@@ -194,7 +211,7 @@ DWORD WINAPI init(LPVOID)
     if (!qcamo::start_overlay(image_base, queue_uniform)) {
         LOG_ERROR("quick menu hook failed");
     }
-    LOG_INFO("ready: F7 menu; F6 toggles Olive Drab/Tiger Stripe");
+    LOG_INFO("ready: G/pad menu with wheel pause; F6 toggles Olive Drab/Tiger Stripe");
     bool held = false;
     for (;;) {
         bool down = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
@@ -205,6 +222,7 @@ DWORD WINAPI init(LPVOID)
             queue_uniform(current == 0 ? 1 : 0);
         }
         held = down;
+        set_menu_pause(qcamo::menu_open.load());
         Sleep(10);
     }
 }

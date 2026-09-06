@@ -116,6 +116,33 @@ HUD colours sampled from the Survival Viewer and the equipment HUD: panel
 `0A0A07`, frame and unselected row `434335`, selected row `A8A88C`, header text
 `95957B`, bright HUD text `A6A68F`, dim `6E6E5E`.
 
+## PC control map
+
+The game's own keyboard prompt art doubles as ground truth for what each pad
+button maps to: `textures/flatlist/ovr_stm/ctrltype_kbd/_win` replaces cross
+with `Enter`, triangle with `E`, square with `Q`, and R1 with a right-click
+mouse icon, and the `type_a` / `type_b` subdirectories give R2 as `2` / `R` and
+L2 as `1` / `Q`. The full map is in the online manual, page 04.
+
+Layout A takes W A S D, Left Ctrl, Left Shift, Space, E, F, H, M, N, O, U, I J
+K L, 1, 2, 9, 0, Tab, Esc and both mouse buttons. Layout B takes the same
+movement keys plus C, E, N, O, Q, R, V, 1, 2, Tab, Esc, the wheel click and
+both mouse buttons. `G` and the arrow keys are free in both. `Esc` is Codec Mode, so it is not
+usable as a close key. Pad buttons map the Xbox way through XInput: L1 is the
+left shoulder, triangle is Y, cross is A. Once the menu freezes the game it can also take keys the
+game owns, which is why W/S navigate alongside the arrows.
+
+## Menu semi-pause
+
+Weapon and item wheel holds both change `GV_PauseLevel` at RVA `0x1D78F6C`
+from `0` to `4`, then restore it to `0` on release. `GV_ExecActor` at RVA
+`0x10EE10` tests each actor's pause mask against this global at `0x10F0FF`.
+Intersecting actors stop; wheel UI and audio actors continue.
+
+Quick menu atomically sets and clears bit `4` on its open/close edges. Other
+pause-level bits remain untouched. This reproduces wheel behavior without
+stopping threads, scheduler fibers, rendering, or audio.
+
 ## External references
 
 - [Konami MGS3 manual](https://metalgear.konami.net/manual/mc1/mgs3/pc/en/page15.html)

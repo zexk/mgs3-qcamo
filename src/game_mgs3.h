@@ -42,4 +42,9 @@ inline constexpr uint32_t kFaceAssetId = 0x0003A157;
 inline constexpr uint32_t kFrameMessage = 0x00000002;
 inline constexpr uint32_t kFrameCaller = 0x5BC850;
 
+// GV_PauseLevel. Weapon and item wheels set bit 2; GV_ExecActor skips actors
+// whose pause mask intersects it, while wheel UI and audio keep updating.
+inline constexpr uint32_t kPauseLevel = 0x1D78F6C;
+inline constexpr uint32_t kWheelPause = 1 << 2;
+
 } // namespace qcamo::mgs3
