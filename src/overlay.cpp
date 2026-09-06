@@ -39,6 +39,7 @@ ResizeBuffers original_resize;
 ID3D11Device* device;
 ID3D11DeviceContext* context;
 ID3D11RenderTargetView* render_target;
+ImVec2 render_size;
 uintptr_t base;
 std::atomic_uintptr_t inventory;
 QueueUniform queue_uniform;
@@ -540,8 +541,13 @@ bool create_render_target(IDXGISwapChain* swap_chain)
 {
     ID3D11Texture2D* buffer{};
     if (FAILED(swap_chain->GetBuffer(0, IID_PPV_ARGS(&buffer)))) return false;
+    D3D11_TEXTURE2D_DESC desc{};
+    buffer->GetDesc(&desc);
     HRESULT result = device->CreateRenderTargetView(buffer, nullptr, &render_target);
     buffer->Release();
+    if (SUCCEEDED(result)) {
+        render_size = {static_cast<float>(desc.Width), static_cast<float>(desc.Height)};
+    }
     return SUCCEEDED(result);
 }
 
@@ -588,6 +594,10 @@ HRESULT STDMETHODCALLTYPE present_hook(IDXGISwapChain* swap_chain, UINT interval
     const auto& uniforms = menu_uniforms();
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
+    // Win32 reports window size, which differs from swap-chain size under
+    // internal supersampling. Draw against actual render target so right-centre
+    // anchoring survives any output/internal-resolution combination.
+    ImGui::GetIO().DisplaySize = render_size;
     ImGui::NewFrame();
     draw_menu(uniforms);
     ImGui::Render();
