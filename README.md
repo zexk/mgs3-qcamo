@@ -34,8 +34,8 @@ Opening quick menu uses same semi-pause as weapon and item wheels. World and
 Snake stop; audio and menu movement continue. `W`/`S` therefore navigate
 without moving Snake.
 
-Enter accepts one change every 2.5 seconds. During reload/settle time, Enter
-does nothing and the menu stays open.
+Changes are gated by one frame rather than a timer, so swaps can be made as
+fast as they can be selected.
 
 Uniform changes run through game's uniform and face-paint asset pipelines, so
 Snake's model and camouflage index both update.

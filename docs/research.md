@@ -35,7 +35,21 @@ Milestone 1 reproduces this native sequence on the gameplay thread:
 9. Load face asset type `0x609B53C5` through same queue/pump/finalize path.
 10. Restore face byte, refresh equipment through `0x2FDB00`, then apply face
     resource `0x6903A157` through `0x2F8D0` and `0xC3600`.
-11. After short settle period, dispatch `0x1A0014`.
+11. On the next frame, dispatch `0x1A0014`.
+
+That last step waited 2.5 seconds for a long time, on the theory that a change
+needs settling. It does not. The figure came from the gap between a native
+change's `0x1A000F` and its `0x1A0014`, which is the Viewer screen closing at
+`0x3030F0`, not part of the change. Neither native path has a timer: the Viewer
+machine at `0x3008C0` returns to state 0 as soon as state 8 finishes, and the
+one at `0x323xxx` waits only on `0x2FF400`, which reads the Viewer context at
+`0x1E14AE0` and so answers no during gameplay. There is no game-side predicate
+to borrow outside the Viewer.
+
+Nothing is left pending once the sequence above returns: both assets are pumped
+until `0xE1970` clears and all three dispatches have gone out. What remains is
+the player consuming them on its own tick, which is one frame. One frame is
+what the mod waits.
 
 Calls to the dispatcher are bracketed by `0x1143F0`, which selects the
 allocator heap the message handler will allocate from. Native brackets with

@@ -17,16 +17,25 @@ using Dispatch = intptr_t(__fastcall*)(void*, uint32_t, void*);
 Dispatch original_dispatch;
 uintptr_t image_base;
 bool applying;
-// How long to wait before the settle refresh, and so how long the input gate
-// holds. Ours was a round 4s guess; the one native change we traced took 2.5s
-// from 1A000F to its own refresh. That is a measurement of how long the game
-// took, not a constant it obeys, so treat this as a tightened guess rather
-// than the game's real figure.
-constexpr uint64_t kSettleMs = 2500;
+// Frames to wait before the settle refresh, and so how long the input gate
+// holds. This replaces a 2.5s wall-clock wait copied from the gap between a
+// native change's 1A000F and its 1A0014 -- but that gap is the Viewer screen
+// closing at 0x3030F0, not anything a change waits for, and neither native
+// change path has a timer at all. Both of theirs wait on Viewer flags through
+// 0x2FF400, which reads null during gameplay, so there is no game-side
+// predicate to borrow.
+//
+// Nothing of ours is left pending when change_camo returns: both assets are
+// pumped until 0xE1970 clears and all three dispatches have gone out. What is
+// left is the player consuming them on its own tick, which is a frame, not
+// seconds. This is the one number to raise if a fast second swap misbehaves.
+constexpr int kSettleFrames = 1;
 
 std::atomic_int pending_uniform{-1};
 std::atomic_int pending_face{-1};
-std::atomic_uint64_t settle_until;
+// Gameplay thread only: set by change_camo, counted down by the frame hook.
+int settle_frames;
+uint64_t change_started;
 std::atomic_bool change_busy;
 bool menu_paused;
 
@@ -157,7 +166,8 @@ void change_camo(uint8_t next, uint8_t next_face)
         change_busy = false;
         return;
     }
-    settle_until = GetTickCount64() + kSettleMs;
+    settle_frames = kSettleFrames;
+    change_started = GetTickCount64();
     int id = game_function<int(__fastcall*)(uint32_t, int)>(
         qcamo::mgs3::kUniformAssetId)(qcamo::mgs3::kUniformAssetType, next);
     LOG_INFO("uniform %u -> %u, face %u -> %u; loading asset %08X", current, next,
@@ -172,7 +182,7 @@ void change_camo(uint8_t next, uint8_t next_face)
                              qcamo::mgs3::kAssetFinish)(queue, qcamo::mgs3::kUniformAssetSlot)
                        : nullptr;
     if (!asset) {
-        settle_until = 0;
+        settle_frames = 0;
         change_busy = false;
         LOG_ERROR("change stopped: asset unavailable; nothing dispatched");
         return;
@@ -225,15 +235,15 @@ intptr_t __fastcall dispatch_hook(void* target, uint32_t message, void* data)
     }
     if (!applying && message == qcamo::mgs3::kFrameMessage && caller == qcamo::mgs3::kFrameCaller) {
         applying = true;
-        if (settle_until && GetTickCount64() >= settle_until) {
+        if (settle_frames > 0 && --settle_frames == 0) {
             send_refresh();
-            settle_until = 0;
             pending_uniform = -1;
             change_busy = false;
-            LOG_INFO("change complete; input ready");
-        } else if (settle_until && pending_uniform.exchange(-1) >= 0) {
+            LOG_INFO("change complete in %llums; input ready",
+                     static_cast<unsigned long long>(GetTickCount64() - change_started));
+        } else if (settle_frames > 0 && pending_uniform.exchange(-1) >= 0) {
             LOG_INFO("uniform change ignored: still settling");
-        } else if (!settle_until) {
+        } else if (settle_frames == 0) {
             int requested = pending_uniform.exchange(-1);
             if (requested >= 0) {
                 change_camo(static_cast<uint8_t>(requested),
