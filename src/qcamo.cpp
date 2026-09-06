@@ -277,11 +277,9 @@ void set_menu_pause(bool pause_menu)
 
 bool queue_uniform(uint8_t uniform, uint8_t face)
 {
-    // Equips come from the open menu, which holds our own wheel pause; F6
-    // comes with the menu closed and must find the game fully unpaused so a
-    // change never stacks onto a game wheel or another pauser.
-    bool from_menu = qcamo::menu_open.load();
-    if (qcamo::GateBlock block = qcamo::gate_state(image_base, from_menu);
+    // Equips come from the open menu, which holds our own wheel pause, so that
+    // one bit is tolerated here; any other pauser still refuses the change.
+    if (qcamo::GateBlock block = qcamo::gate_state(image_base, true);
         block != qcamo::GateBlock::None) {
         LOG_INFO("uniform %u face %u ignored: %s", uniform, face, qcamo::gate_name(block));
         return false;
@@ -294,20 +292,6 @@ bool queue_uniform(uint8_t uniform, uint8_t face)
     pending_uniform = uniform;
     LOG_INFO("uniform %u face %u queued", uniform, face);
     return true;
-}
-
-uint8_t toggle_target()
-{
-    auto stats = qcamo::mem::read<uintptr_t>(image_base + qcamo::mgs3::kStatsSlot);
-    uint8_t current =
-        stats ? qcamo::mem::read<uint8_t>(stats + qcamo::mgs3::kEquippedUniform) : 0;
-    return current == 0 ? 1 : 0;
-}
-
-uint8_t equipped_face()
-{
-    auto stats = qcamo::mem::read<uintptr_t>(image_base + qcamo::mgs3::kStatsSlot);
-    return stats ? qcamo::mem::read<uint8_t>(stats + qcamo::mgs3::kEquippedFace) : 0;
 }
 
 std::filesystem::path own_dir()
@@ -347,18 +331,10 @@ DWORD WINAPI init(LPVOID)
     if (!qcamo::start_overlay(image_base, queue_uniform)) {
         LOG_ERROR("quick menu hook failed");
     }
-    LOG_INFO("ready: G or pad opens the menu, F6 toggles uniform 0/1");
-    bool held = false;
+    LOG_INFO("ready: hold G or the pad chord to open the menu");
     for (;;) {
-        bool down = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
-        if (down && !held) {
-            queue_uniform(toggle_target(), equipped_face());
-        }
-        held = down;
-        // Area watcher. This thread keeps running when the gameplay thread
-        // wedges, so a transition that starts and never finishes shows up here
-        // as a first line with no second one. Reads memory only: calling game
-        // functions from here while the game thread is inside them is not safe.
+        // Area watcher. Reads memory only: calling game functions from this
+        // thread while the gameplay thread is inside them is not safe.
         {
             auto stats = qcamo::mem::read<uintptr_t>(image_base + qcamo::mgs3::kStatsSlot);
             static char area[qcamo::mgs3::kAreaSize + 1];

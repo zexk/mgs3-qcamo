@@ -22,7 +22,7 @@ equipped byte updates labels and camouflage index but leaves Snake's mesh
 unchanged. Running only the uniform asset phase works once, then leaves the
 composite model unsafe for another change.
 
-Milestone 1 reproduces this native sequence on the gameplay thread:
+The mod reproduces this native sequence on the gameplay thread:
 
 1. Write selected uniform to stats `+0x67E`.
 2. Dispatch `0x1A0001` to begin uniform change.
@@ -60,27 +60,25 @@ Native Survival Viewer traces showed same uniform request object, queue, and
 asset handle reused across consecutive changes. Face reload after every uniform
 change was required for repeated gameplay changes.
 
-## Quick menu shell
+## Menu implementation
 
-Phase 2 draws through a D3D11 Present hook and sends confirmed uniform IDs to
-existing gameplay-thread dispatcher hook. Renderer thread only reads equipment
-and inventory state. It never runs asset reload protocol.
+The menu draws through a D3D11 Present hook and hands confirmed selections to
+the dispatcher hook already installed on the gameplay thread. The render thread
+only reads equipment and inventory state; it never runs the asset reload
+protocol, and it never calls into the game at all, which is why sound cues are
+posted rather than played where they are raised.
 
-Keyboard controls: F7 opens or closes; Up/Down select; Enter changes uniform;
-Escape closes. Menu finds item table with same signature as `scripts/probe.py`
-and shows owned uniforms. If signature is unavailable, Olive Drab and Tiger
-Stripe remain as fallback test rows.
-
-Single atomic gate covers queued request, native reload, and the settle
-period. Enter closes menu only after gate accepts selection. This prevents input
-from being accepted during short gap before gameplay thread starts reload.
+It finds the item table by the same signature `scripts/probe.py` uses and lists
+what is owned. One atomic gate covers the queued request and the change itself,
+so a second selection cannot be accepted in the gap before the gameplay thread
+picks up the first.
 
 ## Survival Viewer context
 
-`0x1E14AE0` points to live Viewer context only while screen exists.
-`0x3008C0` and `0x300E50` are its uniform and face state machines.
-Milestone 1 does not construct or tick this UI object; it calls minimal asset
-and player protocol underneath it.
+`0x1E14AE0` points to a live Viewer context only while that screen exists.
+`0x3008C0` and `0x300E50` are its uniform and face state machines. The mod
+never constructs or ticks this object; it calls the asset and player protocol
+underneath it.
 
 ## Failed paths retained as constraints
 
@@ -160,8 +158,8 @@ stopping threads, scheduler fibers, rendering, or audio.
 
 ## Menu gating
 
-The menu opens only during playable gameplay. Three read-only signals,
-checked fail-closed in `src/gameplay_gate.h`:
+The menu opens only during playable gameplay. Four read-only signals, checked
+fail-closed in `src/gameplay_gate.h`:
 
 - Area code at stats `+0x24`: bbtracker's 7-char stage string, where `s*` and
   `v*` are gameplay (`s001a`, `v000a`) and anything else (`title`) is out.
@@ -172,15 +170,15 @@ checked fail-closed in `src/gameplay_gate.h`:
   edge the wheel bit itself must be clear, so a queued change never stacks
   onto a game wheel or another pauser; while open, the menu's own wheel bit
   is tolerated.
+- Player state flags: the test the game's own wheel popups make before they
+  open. Cutscenes keep their stage's area code, so this is the signal that
+  separates a scripted sequence from playable gameplay. See "Player state
+  flags" below.
 
-Enforcement is layered: the render thread refuses the opening edge and force-
+Enforcement is layered: the render thread refuses the opening edge and force
 closes under an open menu, the gameplay thread re-checks before applying a
-queued change, and a 10 ms watchdog drops the pause if Present stalls across
-a load. `F6` goes through the same queue gate.
-
-Cutscene caveat: scripted sequences inside an `s`/`v` stage keep the same area
-code, so this narrows the window but does not yet prove Snake is
-controllable. A demo-playback flag, if one turns up, belongs in the gate.
+queued change, and a 10 ms watchdog drops the pause if Present stalls across a
+load.
 
 ## Pad input
 

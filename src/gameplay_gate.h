@@ -44,9 +44,10 @@ inline const char* gate_name(GateBlock block)
     return "unknown";
 }
 
-// When allow_wheel is false the wheel bit itself blocks (menu opening edge,
-// F6: the game must be fully unpaused). When true our own wheel pause is
-// tolerated (stay-open check, menu equips, gameplay-thread apply).
+// When allow_wheel is false the wheel bit itself blocks, which is what the
+// opening edge wants: the game must be fully unpaused before the menu takes
+// that bit. When true the menu's own wheel pause is tolerated, for the
+// stay-open check, equips, and the gameplay-thread apply.
 inline GateBlock gate_state(uintptr_t base, bool allow_wheel)
 {
     if (!base || !mem::range_readable(base + mgs3::kStatsSlot, sizeof(uintptr_t))) {
