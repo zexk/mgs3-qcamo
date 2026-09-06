@@ -34,7 +34,7 @@ add_library(imgui STATIC
 target_include_directories(imgui PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends)
 
 add_library(qcamo SHARED src/qcamo.cpp src/overlay.cpp src/camo_swatch.cpp
-  src/ctxr.cpp src/hud_font.cpp src/common/log.cpp)
+  src/camo_index.cpp src/ctxr.cpp src/hud_font.cpp src/common/log.cpp)
 set_target_properties(qcamo PROPERTIES PREFIX "" SUFFIX ".asi")
 target_include_directories(qcamo PRIVATE src)
 target_link_libraries(qcamo PRIVATE minhook imgui d3d11 dxgi d3dcompiler dwmapi)

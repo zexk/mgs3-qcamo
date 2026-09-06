@@ -57,6 +57,34 @@ inline constexpr uint32_t kAreaSize = 7;
 // Survival Viewer context slot: live pointer only while the Viewer screen exists.
 inline constexpr uint32_t kViewerSlot = 0x1E14AE0;
 
+// Camouflage. The player record starts at kPlayerSlot and is 0x80 bytes; the
+// per-actor camouflage index the HUD shows sits at +0x24 in tenths of a
+// percent, and the state bitset 0x359020 queries sits at +0x28.
+inline constexpr uint32_t kCamoIndex = 0x1E16CF4;
+inline constexpr uint32_t kPlayerState = 0x1E16CF8;
+inline constexpr int kStateCrouch = 2;
+inline constexpr int kStateProne = 3;
+inline constexpr int kStateOnWall = 0x3B;
+inline constexpr int kStateProneOverride = 0xA9;
+
+// One 0x18-byte record per uniform and per face paint, indexed by the equipped
+// byte. +0x00 is the internal name, +0x08 the value table: 27 terrains of 5
+// postures, signed bytes, ten times the percentage each contributes.
+inline constexpr uint32_t kUniformCamo = 0x1E216E0;
+inline constexpr uint32_t kFaceCamo = 0x1E214A0;
+inline constexpr uint32_t kCamoRecordStride = 0x18;
+inline constexpr uint32_t kCamoRecordValues = 0x08;
+inline constexpr int kCamoPostures = 5;
+inline constexpr int kCamoValues = 27 * kCamoPostures;
+
+// Surface materials under Snake, republished by 0xA8070 every frame, and the
+// table that maps them to terrain indices.
+inline constexpr uint32_t kGroundMaterial = 0x1D38AF8;
+inline constexpr uint32_t kWallMaterial = 0x1D38AFC;
+inline constexpr uint32_t kTerrainMap = 0x1D38B10;
+inline constexpr uint32_t kTerrainMapCount = 0x1D38F10;
+inline constexpr uint32_t kTerrainMapStride = 8;
+
 // Per-frame dispatch observed on gameplay thread.
 inline constexpr uint32_t kFrameMessage = 0x00000002;
 inline constexpr uint32_t kFrameCaller = 0x5BC850;
