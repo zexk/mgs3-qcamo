@@ -24,7 +24,14 @@ inline constexpr uint32_t kAssetRequestId = 0xE17C0;
 inline constexpr uint32_t kAssetFinish = 0xE1680;
 inline constexpr uint32_t kUniformAssetId = 0x9BFA0;
 inline constexpr uint32_t kFinalizeAsset = 0x304050;
-inline constexpr uint32_t kLoadingGuard = 0x1143F0;
+// Sets the allocator's default heap index at kAllocHeapSlot; 0x113F90 reads
+// that global whenever a caller asks for heap -1. The Viewer wraps its own
+// dispatches as set(0) ... set(1) because the Viewer screen runs with the
+// ambient heap already at 1; during gameplay it is 0, so copying the literal
+// pair leaves every later allocation in the wrong arena and the next area
+// load never finishes its wait at 0x9BF40. Always save and restore instead.
+inline constexpr uint32_t kSetAllocHeap = 0x1143F0;
+inline constexpr uint32_t kAllocHeapSlot = 0x1D7A550;
 // Task-context yield/schedule, not a task pump, and 0x106 is not a mask.
 // It looks up the current context in the table at 0x103BC60 (stride 0x90) via
 // the global at 0x1044C60: on context 1 it runs the scheduler and ignores the

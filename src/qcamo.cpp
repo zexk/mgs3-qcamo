@@ -35,6 +35,28 @@ Function game_function(uint32_t rva)
     return reinterpret_cast<Function>(image_base + rva);
 }
 
+// The game routes allocations that ask for heap -1 through the index in
+// kAllocHeapSlot. Message handlers allocate, and native selects heap 0 around
+// its dispatches, so do the same -- but restore whatever gameplay had rather
+// than the literal 1 the Viewer restores, which is only right inside the
+// Viewer screen.
+class AllocHeap {
+public:
+    explicit AllocHeap(int heap)
+        : set_(game_function<void(__fastcall*)(int)>(qcamo::mgs3::kSetAllocHeap)),
+          previous_(qcamo::mem::read<int>(image_base + qcamo::mgs3::kAllocHeapSlot))
+    {
+        set_(heap);
+    }
+    ~AllocHeap() { set_(previous_); }
+    AllocHeap(const AllocHeap&) = delete;
+    AllocHeap& operator=(const AllocHeap&) = delete;
+
+private:
+    void(__fastcall* set_)(int);
+    int previous_;
+};
+
 void send_player(uint32_t message, void* data = nullptr)
 {
     auto player = qcamo::mem::read<void*>(image_base + qcamo::mgs3::kPlayerSlot);
@@ -46,10 +68,8 @@ void send_player(uint32_t message, void* data = nullptr)
     LOG_INFO("send msg=%08X target=%llX data=%llX", message,
              static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(player)),
              static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(data)));
-    auto guard = game_function<void(__fastcall*)(int)>(qcamo::mgs3::kLoadingGuard);
-    guard(0);
+    AllocHeap heap(0);
     original_dispatch(player, message, data);
-    guard(1);
 }
 
 // Second 1A0014 target (Snake actor beside the player controller), latched
@@ -65,11 +85,11 @@ void send_refresh()
     if (latched_actor && player && (player & 0xFFFF0000u) == latched_prefix) {
         LOG_INFO("send msg=%08X target=%llX data=0 (actor)", qcamo::mgs3::kRefreshCamo,
                  static_cast<unsigned long long>(latched_actor));
-        auto guard = game_function<void(__fastcall*)(int)>(qcamo::mgs3::kLoadingGuard);
-        guard(0);
-        original_dispatch(reinterpret_cast<void*>(latched_actor),
-                          qcamo::mgs3::kRefreshCamo, nullptr);
-        guard(1);
+        {
+            AllocHeap heap(0);
+            original_dispatch(reinterpret_cast<void*>(latched_actor),
+                              qcamo::mgs3::kRefreshCamo, nullptr);
+        }
         LOG_INFO("refresh sent to player and actor %llX",
                  static_cast<unsigned long long>(latched_actor));
     } else {
