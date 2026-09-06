@@ -25,6 +25,11 @@ inline constexpr uint32_t kAssetFinish = 0xE1680;
 inline constexpr uint32_t kUniformAssetId = 0x9BFA0;
 inline constexpr uint32_t kFinalizeAsset = 0x304050;
 inline constexpr uint32_t kLoadingGuard = 0x1143F0;
+// Task-context yield/schedule, not a task pump, and 0x106 is not a mask.
+// It looks up the current context in the table at 0x103BC60 (stride 0x90) via
+// the global at 0x1044C60: on context 1 it runs the scheduler and ignores the
+// argument, otherwise it treats the argument as a duration and yields. Calling
+// it from inside a dispatch therefore re-enters the scheduler.
 inline constexpr uint32_t kPumpTasks = 0x725CD0;
 inline constexpr uint32_t kFindAsset = 0x113B00;
 inline constexpr uint32_t kPrepareFace = 0x2F8D0;
@@ -37,6 +42,13 @@ inline constexpr uint32_t kFaceAssetType = 0x609B53C5;
 inline constexpr uint32_t kFaceAsset = 0x6903A157;
 inline constexpr uint32_t kFaceAssetSlot = 0x00413AA8;
 inline constexpr uint32_t kFaceAssetId = 0x0003A157;
+
+// Stats-block area code (bbtracker: 7-char stage string, s*/v* are gameplay).
+inline constexpr uint32_t kAreaCode = 0x24;
+inline constexpr uint32_t kAreaSize = 7;
+
+// Survival Viewer context slot: live pointer only while the Viewer screen exists.
+inline constexpr uint32_t kViewerSlot = 0x1E14AE0;
 
 // Per-frame dispatch observed on gameplay thread.
 inline constexpr uint32_t kFrameMessage = 0x00000002;

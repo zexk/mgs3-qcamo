@@ -17,6 +17,7 @@
 
 #include "camo_swatch.h"
 #include "common/log.h"
+#include "gameplay_gate.h"
 #include "hud_font.h"
 #include "common/mem.h"
 #include "game_mgs3.h"
@@ -86,7 +87,6 @@ struct Pad {
 // GetDigitalActionData returns two bytes, state then active, packed into the
 // flat wrapper's return value.
 using DigitalDataFn = uint16_t (*)(void*, uint64_t, uint64_t);
-using ActionHandleFn = uint64_t (*)(void*, const char*);
 using ConnectedFn = int (*)(void*, uint64_t*);
 
 struct SteamPad {
@@ -146,12 +146,7 @@ bool open_pad()
         return false;
     }
     steam_pad.controller = controller;
-    LOG_INFO("pad ready through steam input: L1=%llu triangle=%llu cross=%llu up=%llu down=%llu",
-             static_cast<unsigned long long>(steam_pad.shoulder),
-             static_cast<unsigned long long>(steam_pad.triangle),
-             static_cast<unsigned long long>(steam_pad.cross),
-             static_cast<unsigned long long>(steam_pad.up),
-             static_cast<unsigned long long>(steam_pad.down));
+    LOG_INFO("pad ready through steam input");
     return true;
 }
 
@@ -159,36 +154,17 @@ Pad read_pad()
 {
     Pad pad{};
     if (!open_pad()) return pad;
-    // Low byte is the pressed state, high byte is whether the action belongs to
-    // the action set the game currently has active. A dead high byte means the
-    // handle is fine but the set is wrong, which no amount of pressing fixes.
-    struct Read {
-        uint64_t action;
-        bool* target;
+    // The low byte is the pressed state; the high byte says whether the action
+    // is in the action set the game currently has active.
+    auto down = [](uint64_t action) {
+        return action && (steam_pad.data(steam_pad.self, steam_pad.controller, action) & 0xFF) != 0;
     };
-    const Read reads[] = {
-        {steam_pad.shoulder, &pad.shoulder}, {steam_pad.triangle, &pad.open_button},
-        {steam_pad.cross, &pad.equip},       {steam_pad.up, &pad.up},
-        {steam_pad.down, &pad.down},
-    };
-    uint32_t snapshot = 0;
-    for (int i = 0; i < 5; ++i) {
-        uint16_t value = reads[i].action
-                             ? steam_pad.data(steam_pad.self, steam_pad.controller,
-                                              reads[i].action)
-                             : 0;
-        *reads[i].target = (value & 0xFF) != 0;
-        snapshot |= static_cast<uint32_t>(value & 0x0101) << (i * 2);
-    }
     pad.present = true;
-    static uint32_t traced = ~0u;
-    if (snapshot != traced) {
-        traced = snapshot;
-        LOG_DEBUG("pad state/active L1=%d/%d tri=%d/%d cross=%d/%d up=%d/%d down=%d/%d",
-                  pad.shoulder, (snapshot >> 1) & 1, pad.open_button, (snapshot >> 3) & 1,
-                  pad.equip, (snapshot >> 5) & 1, pad.up, (snapshot >> 7) & 1, pad.down,
-                  (snapshot >> 9) & 1);
-    }
+    pad.shoulder = down(steam_pad.shoulder);
+    pad.open_button = down(steam_pad.triangle);
+    pad.equip = down(steam_pad.cross);
+    pad.up = down(steam_pad.up);
+    pad.down = down(steam_pad.down);
     return pad;
 }
 
@@ -292,6 +268,28 @@ void poll_menu(const std::vector<uint8_t>& uniforms)
     // way round it is pressed.
     bool keyboard = (GetAsyncKeyState(kHoldKey) & 0x8000) != 0;
     bool held = keyboard || (pad.shoulder && (open || pad.open_button));
+    // Gating: the menu only exists during gameplay. While open, our own wheel
+    // pause bit is tolerated; on the opening edge the game must be fully
+    // unpaused so we never stack onto a game wheel or another pauser.
+    // Blocked holds log once per hold so title-screen idling stays quiet.
+    static bool logged_block;
+    if (open) {
+        if (GateBlock block = gate_state(base, true); block != GateBlock::None) {
+            open = false;
+            held = false;
+            menu_open = false;
+            LOG_INFO("menu closed: %s", gate_name(block));
+        }
+    } else if (held && !can_open_menu(base)) {
+        if (!logged_block) {
+            logged_block = true;
+            LOG_DEBUG("menu open blocked: %s", gate_name(gate_state(base, false)));
+        }
+        held = false;
+    }
+    if (!held) {
+        logged_block = false;
+    }
     if (held != open) {
         open = held;
         menu_open = open;

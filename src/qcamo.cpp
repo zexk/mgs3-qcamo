@@ -8,6 +8,7 @@
 #include "common/log.h"
 #include "common/mem.h"
 #include "game_mgs3.h"
+#include "gameplay_gate.h"
 #include "overlay.h"
 
 namespace {
@@ -16,6 +17,13 @@ using Dispatch = intptr_t(__fastcall*)(void*, uint32_t, void*);
 Dispatch original_dispatch;
 uintptr_t image_base;
 bool applying;
+// How long to wait before the settle refresh, and so how long the input gate
+// holds. Ours was a round 4s guess; the one native change we traced took 2.5s
+// from 1A000F to its own refresh. That is a measurement of how long the game
+// took, not a constant it obeys, so treat this as a tightened guess rather
+// than the game's real figure.
+constexpr uint64_t kSettleMs = 2500;
+
 std::atomic_int pending_uniform{-1};
 std::atomic_uint64_t settle_until;
 std::atomic_bool change_busy;
@@ -33,10 +41,40 @@ void send_player(uint32_t message, void* data = nullptr)
     if (!player) {
         return;
     }
+    // Our sends go straight to original_dispatch, so the dispatch hook never
+    // sees them; log them here to keep the sequence visible in the log.
+    LOG_INFO("send msg=%08X target=%llX data=%llX", message,
+             static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(player)),
+             static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(data)));
     auto guard = game_function<void(__fastcall*)(int)>(qcamo::mgs3::kLoadingGuard);
     guard(0);
     original_dispatch(player, message, data);
     guard(1);
+}
+
+// Second 1A0014 target (Snake actor beside the player controller), latched
+// whenever native code refreshes it. Handles carry a per-session prefix, so
+// the latch is only used while the prefix still matches the live player.
+uintptr_t latched_actor;
+uint32_t latched_prefix;
+
+void send_refresh()
+{
+    send_player(qcamo::mgs3::kRefreshCamo);
+    auto player = qcamo::mem::read<uintptr_t>(image_base + qcamo::mgs3::kPlayerSlot);
+    if (latched_actor && player && (player & 0xFFFF0000u) == latched_prefix) {
+        LOG_INFO("send msg=%08X target=%llX data=0 (actor)", qcamo::mgs3::kRefreshCamo,
+                 static_cast<unsigned long long>(latched_actor));
+        auto guard = game_function<void(__fastcall*)(int)>(qcamo::mgs3::kLoadingGuard);
+        guard(0);
+        original_dispatch(reinterpret_cast<void*>(latched_actor),
+                          qcamo::mgs3::kRefreshCamo, nullptr);
+        guard(1);
+        LOG_INFO("refresh sent to player and actor %llX",
+                 static_cast<unsigned long long>(latched_actor));
+    } else {
+        LOG_INFO("refresh sent to player only (actor %s)", latched_actor ? "stale" : "unknown");
+    }
 }
 
 void* load_asset(uint32_t type, int id)
@@ -56,10 +94,13 @@ void* load_asset(uint32_t type, int id)
 
     auto busy = game_function<int(__fastcall*)()>(qcamo::mgs3::kAssetBusy);
     auto pump = game_function<void(__fastcall*)(int)>(qcamo::mgs3::kPumpTasks);
+    // The game's own area loader waits the same way at 0x9BF40, so re-entering
+    // the scheduler from here is the sanctioned pattern rather than a hack.
     int pumps = 0;
     while (busy() && pumps++ < 10000) {
         pump(0x106);
     }
+    LOG_INFO("asset %08X: %d pumps%s", id, pumps, busy() ? " (still busy)" : "");
     if (busy()) {
         return nullptr;
     }
@@ -77,6 +118,15 @@ void change_camo(uint8_t next)
         LOG_WARN("uniform change ignored: gameplay state unavailable");
         return;
     }
+    // Re-check on the gameplay thread: the menu may have been open when the
+    // change was queued but gameplay left since. Our own wheel pause is
+    // tolerated here; anything else aborts.
+    if (qcamo::GateBlock block = qcamo::gate_state(image_base, true);
+        block != qcamo::GateBlock::None) {
+        change_busy = false;
+        LOG_WARN("uniform change ignored: %s", qcamo::gate_name(block));
+        return;
+    }
 
     auto address = stats + qcamo::mgs3::kEquippedUniform;
     uint8_t current = qcamo::mem::read<uint8_t>(address);
@@ -85,21 +135,28 @@ void change_camo(uint8_t next)
         change_busy = false;
         return;
     }
-    settle_until = GetTickCount64() + 4000;
+    settle_until = GetTickCount64() + kSettleMs;
     uint8_t face = qcamo::mem::read<uint8_t>(stats + qcamo::mgs3::kEquippedFace);
     int id = game_function<int(__fastcall*)(uint32_t, int)>(
         qcamo::mgs3::kUniformAssetId)(qcamo::mgs3::kUniformAssetType, next);
     LOG_INFO("uniform %u -> %u; loading asset %08X", current, next, id);
-    qcamo::mem::write<uint8_t>(address, next);
-    send_player(qcamo::mgs3::kBeginCamoChange);
+    // Load before committing. 1A0001 starts a change the game expects to be
+    // finished by 1A0002 with a real asset; sending the begin and then failing
+    // to load leaves the player mid-change and wedges the next attempt. An
+    // area transition is exactly when the load fails, so ordering it this way
+    // is the difference between a refused change and a frozen game.
     auto queue = load_asset(qcamo::mgs3::kUniformAssetType, id);
     auto asset = queue ? game_function<void*(__fastcall*)(void*, uint32_t)>(
                              qcamo::mgs3::kAssetFinish)(queue, qcamo::mgs3::kUniformAssetSlot)
                        : nullptr;
     if (!asset) {
-        LOG_ERROR("change stopped: loaded asset unavailable");
+        settle_until = 0;
+        change_busy = false;
+        LOG_ERROR("change stopped: asset unavailable; nothing dispatched");
         return;
     }
+    qcamo::mem::write<uint8_t>(address, next);
+    send_player(qcamo::mgs3::kBeginCamoChange);
     send_player(qcamo::mgs3::kLoadCamo, asset);
 
     qcamo::mem::write<uint8_t>(stats + qcamo::mgs3::kEquippedFace, 0);
@@ -128,10 +185,25 @@ intptr_t __fastcall dispatch_hook(void* target, uint32_t message, void* data)
 {
     auto result = original_dispatch(target, message, data);
     auto caller = reinterpret_cast<uintptr_t>(__builtin_return_address(0)) - image_base;
+    if (((message >> 16) & 0xFFu) == 0x1Au) {
+        // Latch the Snake-actor refresh target whenever native code sends
+        // one anywhere but the player slot.
+        if (message == qcamo::mgs3::kRefreshCamo) {
+            auto player =
+                qcamo::mem::read<uintptr_t>(image_base + qcamo::mgs3::kPlayerSlot);
+            auto handle = reinterpret_cast<uintptr_t>(target);
+            if (player && handle && handle != player) {
+                latched_actor = handle;
+                latched_prefix = static_cast<uint32_t>(player & 0xFFFF0000u);
+                LOG_INFO("actor latch: %llX (prefix %04X)",
+                         static_cast<unsigned long long>(handle), latched_prefix >> 16);
+            }
+        }
+    }
     if (!applying && message == qcamo::mgs3::kFrameMessage && caller == qcamo::mgs3::kFrameCaller) {
         applying = true;
         if (settle_until && GetTickCount64() >= settle_until) {
-            send_player(qcamo::mgs3::kRefreshCamo);
+            send_refresh();
             settle_until = 0;
             pending_uniform = -1;
             change_busy = false;
@@ -140,7 +212,9 @@ intptr_t __fastcall dispatch_hook(void* target, uint32_t message, void* data)
             LOG_INFO("uniform change ignored: still settling");
         } else if (!settle_until) {
             int requested = pending_uniform.exchange(-1);
-            if (requested >= 0) change_camo(static_cast<uint8_t>(requested));
+            if (requested >= 0) {
+                change_camo(static_cast<uint8_t>(requested));
+            }
         }
         applying = false;
     }
@@ -165,6 +239,15 @@ void set_menu_pause(bool pause_menu)
 
 bool queue_uniform(uint8_t uniform)
 {
+    // Equips come from the open menu, which holds our own wheel pause; F6
+    // comes with the menu closed and must find the game fully unpaused so a
+    // change never stacks onto a game wheel or another pauser.
+    bool from_menu = qcamo::menu_open.load();
+    if (qcamo::GateBlock block = qcamo::gate_state(image_base, from_menu);
+        block != qcamo::GateBlock::None) {
+        LOG_INFO("uniform %u ignored: %s", uniform, qcamo::gate_name(block));
+        return false;
+    }
     if (change_busy.exchange(true)) {
         LOG_INFO("uniform %u ignored: change gate active", uniform);
         return false;
@@ -172,6 +255,14 @@ bool queue_uniform(uint8_t uniform)
     pending_uniform = uniform;
     LOG_INFO("uniform %u queued", uniform);
     return true;
+}
+
+uint8_t toggle_target()
+{
+    auto stats = qcamo::mem::read<uintptr_t>(image_base + qcamo::mgs3::kStatsSlot);
+    uint8_t current =
+        stats ? qcamo::mem::read<uint8_t>(stats + qcamo::mgs3::kEquippedUniform) : 0;
+    return current == 0 ? 1 : 0;
 }
 
 std::filesystem::path own_dir()
@@ -211,17 +302,43 @@ DWORD WINAPI init(LPVOID)
     if (!qcamo::start_overlay(image_base, queue_uniform)) {
         LOG_ERROR("quick menu hook failed");
     }
-    LOG_INFO("ready: G/pad menu with wheel pause; F6 toggles Olive Drab/Tiger Stripe");
+    LOG_INFO("ready: G or pad opens the menu, F6 toggles uniform 0/1");
     bool held = false;
     for (;;) {
         bool down = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
         if (down && !held) {
-            auto stats = qcamo::mem::read<uintptr_t>(image_base + qcamo::mgs3::kStatsSlot);
-            uint8_t current = stats ? qcamo::mem::read<uint8_t>(
-                                          stats + qcamo::mgs3::kEquippedUniform) : 0;
-            queue_uniform(current == 0 ? 1 : 0);
+            queue_uniform(toggle_target());
         }
         held = down;
+        // Area watcher. This thread keeps running when the gameplay thread
+        // wedges, so a transition that starts and never finishes shows up here
+        // as a first line with no second one. Reads memory only: calling game
+        // functions from here while the game thread is inside them is not safe.
+        {
+            auto stats = qcamo::mem::read<uintptr_t>(image_base + qcamo::mgs3::kStatsSlot);
+            static char area[qcamo::mgs3::kAreaSize + 1];
+            if (stats && qcamo::mem::range_readable(stats + qcamo::mgs3::kAreaCode,
+                                                    qcamo::mgs3::kAreaSize)) {
+                char now[qcamo::mgs3::kAreaSize + 1]{};
+                for (uint32_t i = 0; i < qcamo::mgs3::kAreaSize; ++i) {
+                    now[i] = qcamo::mem::read<char>(stats + qcamo::mgs3::kAreaCode + i);
+                }
+                if (__builtin_memcmp(now, area, qcamo::mgs3::kAreaSize) != 0) {
+                    LOG_INFO("area %s -> %s", area[0] ? area : "(none)", now);
+                    __builtin_memcpy(area, now, sizeof(now));
+                }
+            }
+        }
+        // Watchdog: Present may stall across loads and cutscene cuts, so drop
+        // our pause promptly when gameplay goes away under an open menu. The
+        // render thread closes its side on the next frame.
+        if (qcamo::menu_open.load()) {
+            if (qcamo::GateBlock block = qcamo::gate_state(image_base, true);
+                block != qcamo::GateBlock::None) {
+                qcamo::menu_open = false;
+                LOG_INFO("menu closed: %s", qcamo::gate_name(block));
+            }
+        }
         set_menu_pause(qcamo::menu_open.load());
         Sleep(10);
     }
