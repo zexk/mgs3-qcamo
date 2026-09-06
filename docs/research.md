@@ -440,6 +440,32 @@ start at entry 40 and face paints at entry 73. Capacity of at least one means
 owned. Getting this wrong by one shifts every entry onto its neighbour's
 ownership, which reads as unlocked camouflage appearing in the menu.
 
+## UI sound
+
+`0x9ECC0` plays a sound cue. It takes one argument, the cue id in `ecx`, and
+nothing else: it masks the id to eleven bits, tags it `0x43` and hands it to the
+mixer. The `Misc/BP_SE.DAT` bank behind it loads a table of 0x54-byte records at
+`0x1B9F4B8`, but no UI code touches that directly -- everything goes through this
+wrapper, which is what makes it usable from a mod.
+
+Thirty-eight distinct cue ids are passed to it across the executable, and menu
+code overwhelmingly uses three of them: `0x1A00B` cursor, `0x1A00C` decide,
+`0x1A00D` back. The Survival Viewer's camouflage list is no exception, at
+`0x302628`, `0x302656` and `0x302710`.
+
+The weapon and item wheels are the closer model for a quick menu, and they have
+their own pair. Both wheel modules play `0x1A008` immediately after taking the
+`GV_PauseLevel` wheel bit, at `0x32DA49` and `0x32E6C6`, and `0x1A009` on the
+way out, at `0x32D361` and `0x32E034`. Searching for a `0x9ECC0` call just after
+a `set_pause(4)` is what found them; scanning for `mov ecx, imm32` immediately
+before the call does not, because one of the two sites has an unrelated store
+in between.
+
+`0x300F` is the "operation not permitted" sound, useful for a refused action.
+
+Calls must be made from the gameplay thread. The menu runs on the render thread,
+so it posts a cue and the frame hook plays it.
+
 ## External references
 
 - [Konami MGS3 manual](https://metalgear.konami.net/manual/mc1/mgs3/pc/en/page15.html)

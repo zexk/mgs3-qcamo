@@ -85,6 +85,22 @@ inline constexpr uint32_t kTerrainMap = 0x1D38B10;
 inline constexpr uint32_t kTerrainMapCount = 0x1D38F10;
 inline constexpr uint32_t kTerrainMapStride = 8;
 
+// UI sound. 0x9ECC0 takes a cue id in ecx and nothing else: it masks the id to
+// eleven bits, tags it 0x43 and hands it to the mixer. Every menu in the game
+// uses the same three cues, and the Survival Viewer's camouflage list is no
+// exception -- cursor at 0x302628, decide at 0x302656, back at 0x302710.
+inline constexpr uint32_t kPlaySound = 0x9ECC0;
+// The weapon and item wheels open with 0x1A008 and close with 0x1A009, in both
+// wheel modules: 0x32DA49 and 0x32E6C6 play the first immediately after taking
+// the same pause bit this menu takes, 0x32D361 and 0x32E034 the second.
+inline constexpr uint32_t kSoundOpen = 0x1A008;
+inline constexpr uint32_t kSoundWheelClose = 0x1A009;
+// The game's "not permitted" sound, played when an equip is refused.
+inline constexpr uint32_t kSoundDenied = 0x300F;
+inline constexpr uint32_t kSoundCursor = 0x1A00B;
+inline constexpr uint32_t kSoundDecide = 0x1A00C;
+inline constexpr uint32_t kSoundCancel = 0x1A00D;
+
 // Per-frame dispatch observed on gameplay thread.
 inline constexpr uint32_t kFrameMessage = 0x00000002;
 inline constexpr uint32_t kFrameCaller = 0x5BC850;

@@ -235,6 +235,10 @@ intptr_t __fastcall dispatch_hook(void* target, uint32_t message, void* data)
     }
     if (!applying && message == qcamo::mgs3::kFrameMessage && caller == qcamo::mgs3::kFrameCaller) {
         applying = true;
+        if (int cue = qcamo::pending_sound.exchange(0); cue) {
+            game_function<void(__fastcall*)(uint32_t)>(qcamo::mgs3::kPlaySound)(
+                static_cast<uint32_t>(cue));
+        }
         if (settle_frames > 0 && --settle_frames == 0) {
             send_refresh();
             pending_uniform = -1;

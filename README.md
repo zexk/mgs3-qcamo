@@ -37,6 +37,10 @@ without moving Snake.
 Changes are gated by one frame rather than a timer, so swaps can be made as
 fast as they can be selected.
 
+The menu uses the game's own sounds: the weapon wheel's open and the Survival
+Viewer's cursor, decide and back, with the game's refusal sound when an equip
+is rejected or the selected set is already worn.
+
 Uniform changes run through game's uniform and face-paint asset pipelines, so
 Snake's model and camouflage index both update.
 

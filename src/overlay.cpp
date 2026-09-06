@@ -382,6 +382,7 @@ void poll_menu(const std::vector<uint8_t>& uniforms)
         open = held;
         menu_open = open;
         LOG_INFO("menu %s by %s", open ? "opened" : "closed", keyboard ? "keyboard" : "pad");
+        pending_sound = open ? mgs3::kSoundOpen : mgs3::kSoundCancel;
         // Rows are sorted best camouflage first, so opening on row 0 puts the
         // cursor on the best swap available rather than on what Snake has on.
         if (open) selected = 0;
@@ -392,14 +393,25 @@ void poll_menu(const std::vector<uint8_t>& uniforms)
     bool down = pressed_any(VK_DOWN, 'S');
     if (up || pad_up) {
         selected = wrapped(selected, count, -1);
+        pending_sound = mgs3::kSoundCursor;
         LOG_INFO("menu selected uniform %u", uniforms[selected]);
     }
     if (down || pad_down) {
         selected = wrapped(selected, count, 1);
+        pending_sound = mgs3::kSoundCursor;
         LOG_INFO("menu selected uniform %u", uniforms[selected]);
     }
-    // Equipping leaves the menu up; releasing the hold is what closes it.
-    if (pressed(VK_RETURN) || pad_equip) queue_uniform(uniforms[selected], paired_face);
+    // Equipping leaves the menu up; releasing the hold is what closes it. The
+    // cue only goes out if the change was accepted, so a refused equip stays
+    // silent rather than lying about it.
+    if (pressed(VK_RETURN) || pad_equip) {
+        // Equipping what Snake already wears is refused here rather than in
+        // change_camo, so it never takes the change gate and answers with the
+        // game's refusal sound instead of a confirmation.
+        bool worn = uniforms[selected] == equipped_uniform() && paired_face == equipped_face();
+        bool accepted = !worn && queue_uniform(uniforms[selected], paired_face);
+        pending_sound = accepted ? mgs3::kSoundDecide : mgs3::kSoundDenied;
+    }
 }
 
 void draw_menu(const std::vector<uint8_t>& uniforms)
@@ -623,6 +635,7 @@ bool install_hooks()
 } // namespace
 
 std::atomic_bool menu_open;
+std::atomic_int pending_sound;
 
 bool start_overlay(uintptr_t image_base, QueueUniform callback)
 {
