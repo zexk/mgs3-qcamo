@@ -1,500 +1,471 @@
-# MGS3 camouflage reload protocol
-
-Verified live against PC Master Collection executable timestamp `0x6980B92F`.
-All addresses below are module-relative RVAs.
-
-## Persistent state
-
-- `0xACDE98`: pointer to player stats
-- stats `+0x67E`: equipped uniform byte
-- stats `+0x67F`: equipped face-paint byte
-- `0x1E16CD0`: encoded player-controller handle
-- `0x10EDC0`: central message dispatcher
-
-`scripts/probe.py` finds the stats slot by signature, reads current equipment,
-and locates the inventory table read-only. Uniform ownership starts at item 40,
-uses 80-byte entries, and treats capacity `>= 1` as owned.
-
-## Working quick-change sequence
-
-Uniform changes require both uniform and face-paint reloads. Changing only the
-equipped byte updates labels and camouflage index but leaves Snake's mesh
-unchanged. Running only the uniform asset phase works once, then leaves the
-composite model unsafe for another change.
-
-The mod reproduces this native sequence on the gameplay thread:
-
-1. Write selected uniform to stats `+0x67E`.
-2. Dispatch `0x1A0001` to begin uniform change.
-3. Resolve uniform asset ID with `0x9BFA0` and type `0x602F5702`.
-4. Queue its single resource slot through `0xE1660` and `0xE17C0`.
-5. While `0xE1970` reports busy, pump task `0x106` through `0x725CD0`.
-6. Finalize through `0x304050`; resolve slot `0x0D413AA8` with `0xE1680`.
-7. Dispatch `0x1A0002` with returned asset handle.
-8. Save current face paint, clear stats `+0x67F`, and dispatch `0x1A000F`.
-9. Load face asset type `0x609B53C5` through same queue/pump/finalize path.
-10. Restore face byte, refresh equipment through `0x2FDB00`, then apply face
-    resource `0x6903A157` through `0x2F8D0` and `0xC3600`.
-11. On the next frame, dispatch `0x1A0014`.
-
-That last step waited 2.5 seconds for a long time, on the theory that a change
-needs settling. It does not. The figure came from the gap between a native
-change's `0x1A000F` and its `0x1A0014`, which is the Viewer screen closing at
-`0x3030F0`, not part of the change. Neither native path has a timer: the Viewer
-machine at `0x3008C0` returns to state 0 as soon as state 8 finishes, and the
-one at `0x323xxx` waits only on `0x2FF400`, which reads the Viewer context at
-`0x1E14AE0` and so answers no during gameplay. There is no game-side predicate
-to borrow outside the Viewer.
-
-Nothing is left pending once the sequence above returns: both assets are pumped
-until `0xE1970` clears and all three dispatches have gone out. What remains is
-the player consuming them on its own tick, which is one frame. One frame is
-what the mod waits.
-
-Calls to the dispatcher are bracketed by `0x1143F0`, which selects the
-allocator heap the message handler will allocate from. Native brackets with
-`(0)` and `(1)`; copy only the `(0)`, and restore the value that was there.
-See "Allocator heap index" below.
-
-Native Survival Viewer traces showed same uniform request object, queue, and
-asset handle reused across consecutive changes. Face reload after every uniform
-change was required for repeated gameplay changes.
-
-## Menu implementation
-
-The menu draws through a D3D11 Present hook and hands confirmed selections to
-the dispatcher hook already installed on the gameplay thread. The render thread
-only reads equipment and inventory state; it never runs the asset reload
-protocol, and it never calls into the game at all, which is why sound cues are
-posted rather than played where they are raised.
-
-It finds the item table by the same signature `scripts/probe.py` uses and lists
-what is owned. One atomic gate covers the queued request and the change itself,
-so a second selection cannot be accepted in the gap before the gameplay thread
-picks up the first.
-
-## Survival Viewer context
-
-`0x1E14AE0` points to a live Viewer context only while that screen exists.
-`0x3008C0` and `0x300E50` are its uniform and face state machines. The mod
-never constructs or ticks this object; it calls the asset and player protocol
-underneath it.
-
-## Failed paths retained as constraints
-
-- Raw stats write: labels change, mesh does not.
-- Stats write plus `0x1A0014`: same result.
-- Asynchronous uniform queue outside Viewer: crashes because task pump/finalize
-  phase is missing.
-- Uniform reload without face reload: first change works, second crashes.
-- Preloading two uniforms into resource pool: pool exposes one active slot.
-
-## Camouflage swatch assets
-
-Master Collection ships every texture loose under `textures/flatlist/_win` in
-CTXR form. Header is `TXTR`, big-endian version at `0x04`, big-endian width and
-height at `0x08` and `0x0A`, and a big-endian byte count at `0x80` followed by
-the top mip level as raw BGRA. Remaining mip levels use a different framing and
-are not needed.
-
-The Survival Viewer camouflage icons are seamless 128x128 tiles in the same
-directory, named by asset id with no readable name anywhere on disk. Filtering
-the hash-named textures to 128x128 with a fully opaque alpha channel (0x80 is
-opaque, not 0xFF) narrows them to 49, and the codec portraits in that set are
-the `*fb5*` ids. Uniform ids follow the `UNIFORM/...` string block at file
-offset `0x8D0BC8` in `METAL GEAR SOLID3.exe`, which matches the Survival Viewer
-order; each icon was matched to its uniform by comparing the tile against the
-body texture that uniform loads. The table lives in `src/camo_swatch.cpp`.
-
-Uniform bodies all share the source name `sna_def_olive.bmp`, so the flatlist
-also holds one hashed body copy per camouflage. That mapping is not guessable
-from the hash either, but each camouflage slot lists its own copy in
-`sp/slot/camoufla-<slot>/bp_assets.txt`, whose first field is the flatlist path.
-Slot names use the original internal spelling: `normal`, `rain_stroke`, `garco`,
-`desert`, `animal`. Six uniforms are not BDU camouflage and carry their own body
-texture: naked, sneaking suit, scientist, officer, maintenance, tuxedo. Slots
-`cell`, `grenade`, and `mummy` exist on disk but have no uniform id. The `banana`
-slot ships blank, and so does its icon.
-
-## HUD font
-
-`Misc/Layoutfont/_win/layoutfont.ctxr` is the bitmap atlas the game draws its
-own HUD text with: 960x200, 32 columns by **5** rows of 30x40 cells, glyph shape
-in alpha only and `0x80` for opaque. Cell zero is ASCII `0x20`, so the first
-three rows cover printable ASCII and the last two hold accented Latin. The row
-count is easy to get wrong by eye; the ink bands sit at y 2, 42, 82, 121 and
-161, a pitch of 40. Baselines line up when each glyph is drawn across its whole
-cell, so only the horizontal ink bounds need measuring for proportional spacing.
-
-HUD colours sampled from the Survival Viewer and the equipment HUD: panel
-`0A0A07`, frame and unselected row `434335`, selected row `A8A88C`, header text
-`95957B`, bright HUD text `A6A68F`, dim `6E6E5E`.
-
-## PC control map
-
-The game's own keyboard prompt art doubles as ground truth for what each pad
-button maps to: `textures/flatlist/ovr_stm/ctrltype_kbd/_win` replaces cross
-with `Enter`, triangle with `E`, square with `Q`, and R1 with a right-click
-mouse icon, and the `type_a` / `type_b` subdirectories give R2 as `2` / `R` and
-L2 as `1` / `Q`. The full map is in the online manual, page 04.
-
-Layout A takes W A S D, Left Ctrl, Left Shift, Space, E, F, H, M, N, O, U, I J
-K L, 1, 2, 9, 0, Tab, Esc and both mouse buttons. Layout B takes the same
-movement keys plus C, E, N, O, Q, R, V, 1, 2, Tab, Esc, the wheel click and
-both mouse buttons. `G` and the arrow keys are free in both. `Esc` is Codec Mode, so it is not
-usable as a close key. Once the menu freezes the game it can also take keys the
-game owns, which is why W/S navigate alongside the arrows.
-
-## Menu semi-pause
-
-Weapon and item wheel holds both change `GV_PauseLevel` at RVA `0x1D78F6C`
-from `0` to `4`, then restore it to `0` on release. `GV_ExecActor` at RVA
-`0x10EE10` tests each actor's pause mask against this global at `0x10F0FF`.
-Intersecting actors stop; wheel UI and audio actors continue.
-
-Quick menu atomically sets and clears bit `4` on its open/close edges. Other
-pause-level bits remain untouched. This reproduces wheel behavior without
-stopping threads, scheduler fibers, rendering, or audio.
-
-## Menu gating
-
-The menu opens only during playable gameplay. Four read-only signals, checked
-fail-closed in `src/gameplay_gate.h`:
-
-- Area code at stats `+0x24`: bbtracker's 7-char stage string, where `s*` and
-  `v*` are gameplay (`s001a`, `v000a`) and anything else (`title`) is out.
-  This alone excludes title screens and other non-stage states.
-- Survival Viewer context at RVA `0x1E14AE0`: live pointer only while the
-  Viewer screen exists; non-null blocks.
-- `GV_PauseLevel`: no bits outside the wheel bit may be set. On the opening
-  edge the wheel bit itself must be clear, so a queued change never stacks
-  onto a game wheel or another pauser; while open, the menu's own wheel bit
-  is tolerated.
-- Player state flags: the test the game's own wheel popups make before they
-  open. Cutscenes keep their stage's area code, so this is the signal that
-  separates a scripted sequence from playable gameplay. See "Player state
-  flags" below.
-
-Enforcement is layered: the render thread refuses the opening edge and force
-closes under an open menu, the gameplay thread re-checks before applying a
-queued change, and a 10 ms watchdog drops the pause if Present stalls across a
-load.
-
-## Pad input
-
-The pad reaches this process only through Steam Input. Neither binary imports
-an input API at all: the executable takes `GetAsyncKeyState` and `GetKeyState`
-from USER32 and nothing else, and both it and `Engine.dll` pull `SteamInput006`
-through `SteamInternal_FindOrCreateUserInterface`. Ruled out along the way, each
-by observation rather than by imports:
-
-- XInput reports `ERROR_DEVICE_NOT_CONNECTED` on all four slots. `xinput1_4.dll`
-  in the process is loaded by this mod, not by the game.
-- The winmm joystick API enumerates nothing. `winmm.dll` being resident is the
-  ASI loader, not the game.
-- DirectInput 8 enumerates nothing under `DI8DEVCLASS_GAMECTRL`, even though the
-  game loads `dinput8.dll` on demand. Enumerating `DI8DEVCLASS_ALL` instead
-  finds only "Wine Mouse", which is a trap worth avoiding.
-
-Steam Input does see it: one controller, type 13, which is a DualSense.
-
-The game drives Steam Input through the C++ interface, so hooking the flat
-`SteamAPI_ISteamInput_*` exports catches nothing. Those exports are still useful
-as documentation: each is a thunk of the form `mov rax,[rcx]; jmp [rax+disp]`,
-which gives the vtable slots without guessing at an SDK layout. `RunFrame` is
-0x18, `GetConnectedControllers` 0x30, `GetActionSetHandle` 0x48,
-`GetDigitalActionHandle` 0x80, `GetDigitalActionData` 0x88 and
-`GetDigitalActionOrigins` 0x90, so slots 3, 6, 9, 16, 17 and 18.
-`GetDigitalActionData` returns its two bytes through a hidden pointer, which the
-flat wrapper makes plain with a `lea rdx,[rsp+0x30]` ahead of the call.
-
-Patching slots 9, 16 and 17 on the live interface showed the game polling
-sixteen digital actions every frame, handles 1 to 16. `GetStringForDigitalActionName`
-names them in Xbox terms: 1 `Y Button`, 2 `B Button`, 3 `X Button`, 4 `A Button`,
-5 to 8 `Arrow Up/Right/Down/Left`, 9 and 10 the stick buttons, 11 `L1 Button`,
-12 `R1 Button`, 13 `L2 Button`, 14 `R2 Button`, 15 `Back Button`, 16 `Start
-Button`. So triangle is 1, cross is 4 and L1 is 11.
-
-Those display names are not what `GetDigitalActionHandle` takes; it wants the
-identifier from the game's action manifest, which is not on disk and is not in
-the binary's strings. Rather than hardcode the numbers, `open_pad` walks handles
-1 to 64, asks each for its name and keeps the ones it recognises. No hooks are
-left installed.
-
-Sticks are analog actions whose names are not among the digital sixteen, so the
-menu navigates on the D-pad only.
-
-## Face paint assets
-
-Face paint ids follow the `FACE/...` string block that runs straight on from the
-uniform names in `METAL GEAR SOLID3.exe`, at file offset `0x8D0CF0`. The game's
-own camouflage records name all twenty-three, in equipped-face order: no paint,
-woodland, black, water, mountain, splitter, snow, kabuki, zombie, oyama, mask,
-green, brown, infinity, then the nationals soviet union, united kingdom, france,
-germany, italy, spain, sweden, japan, usa. One per `sp/slot/facepaint-*` slot.
-
-The Survival Viewer has its own face paint thumbnails, so the face textures are
-not the thing to draw. They are 128x64 tiles in `textures/flatlist/_win`, named
-by asset id like the uniform icons but at half the height, and the game keeps
-the whole list of them at RVA `0x8ED380`: twenty-three consecutive dwords in
-equipped-face order.
-
-| face paint | icon | | face paint | icon |
-| --- | --- | --- | --- | --- |
-| no paint | `000a365b` | | brown | `00ac362b` |
-| woodland | `0042367f` | | infinity | `004c3656` |
-| black | `00e9362a` | | soviet union | `0011366c` |
-| water | `0092367d` | | united kingdom | `008dab1c` |
-| mountain | `00113632` | | france | `00a3363b` |
-| splitter | `006a366f` | | germany | `0010363e` |
-| snow | `002d366f` | | italy | `00df3647` |
-| kabuki | `0080364d` | | spain | `005f366f` |
-| zombie | `0000368b` | | sweden | `00433670` |
-| oyama | `008b3660` | | japan | `006c364b` |
-| mask | `00c93657` | | usa | `00bf3677` |
-| green | `00ac363f` | | | |
-
-Twelve of these had been identified by eye first, and nine of the twelve landed
-on their own index in this table, which is what confirms the ordering. The other
-three say what artwork matching costs: `00c93657` was read as oyama and is
-really mask, and the id read as zombie, `00ac966f`, is not a face icon at all.
-It belongs to the second block of uniform icons described below.
-
-There is a uniform icon table too, at RVA `0x8EDCD0`, followed at `0x8EDD60` by
-a second block of the same uniforms at 128x64. Neither matches the uniform icon
-list in `camo_swatch.cpp` index for index -- ten of thirty-three differ, and the
-order looks like Viewer display order rather than equipped-uniform order. The
-list drawn from artwork is correct on screen, so it was left alone, but that
-table is where to look if a uniform swatch ever comes out wrong.
-
-The per-slot manifests are still useful for the face textures themselves. Each
-`facepaint-*` slot lists exactly one, mostly `0003a157.img_<hash>.ctxr` where
-`0003a157` is the id of `sna_face_def`; `none` takes plain `sna_face_def.bmp.ctxr`,
-`brown` the unhashed `0003a157.img.ctxr`, and `mask` has no face texture at all
-because it is the Raiden mask, a model swap.
-
-## Task pump
-
-`0x725CD0`, used as the asset wait, is a task-context yield rather than a task
-pump. `0x22190` finds the current context by scanning the table at `0x103BC60`
-with stride `0x90` for the pointer held in `0x1044C60`, returning its index.
-`0x725CD0` compares that index against 1: on a match it runs the scheduler and
-ignores its argument, otherwise it converts the argument to a duration and
-yields. So `0x106` is a duration, not a category mask, and on the gameplay
-thread it is discarded.
-
-So `while (busy()) pump(0x106)` re-enters the scheduler from inside a message
-dispatch. The game itself does exactly this in its area loader at `0x9BF40`, so
-the pattern is sound; dropping it crashes instead, because nothing else
-advances the request outside the Viewer. The Viewer does not pump only because
-it ticks its change one state per frame, which is why its `0x1A0001` and
-`0x1A0002` sit ~250ms apart.
-
-## Allocator heap index
-
-`0x1143F0` is a single instruction: `mov [0x1D7A550], ecx`. It is not a lock and
-not a loading guard. `0x1D7A550` is the allocator's default heap index: the
-allocator at `0x113F90` does `cmovs edi, [0x1D7A550]` whenever a caller asks for
-heap `-1`, and indexes the heap descriptor table at `0x1E2C4A0` with stride
-`0x28`. `0x114300` initialises one descriptor; `0x114280` and `0x114420` free
-into the same table.
-
-The Survival Viewer brackets each of its dispatches as `set(0)` ... `set(1)`
-because the Viewer screen runs with the ambient heap already at 1; its teardown
-at `0x303169` writes 0 back on the way out. During gameplay the ambient heap is
-0, so copying that literal pair leaves the index at 1 forever. Every later
-allocation then lands in the wrong arena and the next area transition never
-finishes: the area loader at `0x9BDA0` sits in its own pump loop at `0x9BF40`
-(`0x725CD0(0x106)` until `0xE1970` clears) while the rest of the game keeps
-rendering at 60 FPS. That is the semi-pause. Save and restore the real ambient
-value instead of hardcoding 1.
-
-The bisect that isolated it: writing the stats byte alone transitioned fine,
-while every variant that dispatched anything -- `0x1A0001` alone, the two
-dispatches with a stale handle, or the full protocol -- wedged. The common
-factor was the dispatch bracket, not the asset work. Pumping was never
-implicated: the area loader pumps the same way.
-
-Three readings were wrong along the way and are recorded so they are not
-repeated. A single program-counter sample showed `RtlAcquireSRWLockExclusive`
-and was read as a deadlock; the game was in fact running normally at 60 FPS the
-whole time, so the thread, lock and task-context investigation was chasing
-ordinary behaviour. The asset pools and request modes were suspected twice and
-are byte-identical between a native change and ours.
-
-## Area asset loader
-
-`0x9BDA0` loads a list of asset indices for a stage. Its pool argument is a
-small cache of 16-byte entries starting at `pool+0x10`: dword asset id at `+0`,
-queue pointer at `+8`. It first scans the cache for ids already resident, then
-for each remaining id takes a free entry, calls `mode(queue, 2)`, `id(queue,
-asset)`, pumps until `0xE1970` clears, and calls `0xE16B0(queue, 2)`.
-`0x304050` is a wrapper over that last call which brackets it with the heap
-index and restores from `0x1E15760`.
-
-## Viewer uniform-change state machine
-
-`0x3008C0` is the Viewer's uniform change, a jump-table state machine with the
-index at `[this+0x26D8]` and the table at `0x300BC8`. It runs one step per
-frame and returns without advancing while the asset system is busy, which is
-why a native change takes about 2.5 seconds of wall clock.
-
-- state 2 (`0x3008FE`): write `[this+0x218]` to stats `+0x67E`, refresh
-  equipment through `0x2FDB00`
-- state 3 (`0x30093D`): dispatch `0x1A0001` to the player
-- state 7 (`0x300A10`): resolve the asset id, `request(type)`, `mode(queue, 2)`,
-  `id(queue, asset)`
-- state 8 (`0x300A83`): wait for `0xE1970`, `0x304050(entry, 2)`,
-  `finish(queue, 0x0D413AA8)`, dispatch `0x140025` to `[this+0x220]`, dispatch
-  `0x1A0002` with the handle, then branch on bit 11 of the uniform flags: set
-  clears the face byte and dispatches `0x1A000F`, clear leaves the face alone
-
-`0x302FB0` and the chain through `0x303070`, `0x3030B0`, `0x3030F0` and
-`0x3031B8` is the Viewer *screen* closing, not change completion: it restores
-the pause and UI globals, zeroes `0x1E15760`, and sends `0x1A0014`. The
-`mode(queue, 1)` and `0x114280` it performs at `0x3030CF` are on the Viewer's
-own queue, `[[this+0x50]+0x10]`, never on a request queue. Passing ours to
-`0x114280` writes a free-list link over the queue's name string and kills the
-game shortly after.
-
-## Asset request modes
-
-The native change and ours pass identical arguments to the asset calls:
-`request(type)`, `mode(queue, 2)`, `id(queue, asset)`, `finalize(request, 2)`,
-`finish(queue, slot)`. The mode 2 constants inherited from the proof of concept
-are correct.
-
-Request mode is owned by the game, not by a change. Hooking `0xE1660` shows the
-game putting the uniform and face queues into mode 2 from `0x9BF23` seconds
-before any change runs, and opening the Survival Viewer puts twelve queues into
-mode 2 from `0x11016E`. Our `mode(queue, 2)` inside `load_asset` is therefore
-redundant, and restoring those queues to mode 1 afterwards destroys state the
-game established: doing so crashes the game a second or so later.
-
-## Reading a live build
-
-The shipped executable is Steam-DRM wrapped (a `.bind` section), so `.text` on
-disk decodes as garbage. Disassemble from `/proc/<pid>/mem` at the module base
-found in `/proc/<pid>/maps` instead. Anything the mod hooks reads back as a
-MinHook `jmp` in the first five bytes, so re-align a few bytes earlier when a
-function entry looks wrong.
+# MGS3 internals
+
+PC Master Collection, executable timestamp `0x6980B92F`. All addresses are
+module-relative RVAs unless a path is given.
+
+The shipped executable is Steam DRM wrapped (`.bind` section), so `.text` on
+disk decodes as garbage. Disassemble from `/proc/<pid>/mem` at the base in
+`/proc/<pid>/maps`. Hooked functions read back with a `jmp` over their first
+five bytes.
+
+## Globals
+
+| RVA | Contents |
+| --- | --- |
+| `0xACDE98` | Pointer to player stats |
+| `0x1E16CD0` | Player record, 0x80 bytes. Also the encoded controller handle |
+| `0x1E14AE0` | Survival Viewer context, non-null only while that screen exists |
+| `0x1D78F6C` | `GV_PauseLevel` |
+| `0x1E21AB0` | Player state flags A |
+| `0x1E21AB4` | Player state flags B |
+| `0x1D7A550` | Allocator default heap index |
+| `0x1E2C4A0` | Heap descriptor table, stride `0x28` |
+| `0x1E15760` | Saved heap index, restored by `0x304050` |
+| `0x1D30B08` | Item records, stride `0x50` |
+| `0x1E216E0` | Uniform camouflage records, stride `0x18` |
+| `0x1E214A0` | Face paint camouflage records, stride `0x18` |
+| `0x1D38AF8` | Ground surface material, republished each frame |
+| `0x1D38AFC` | Wall surface material, `-1` when none |
+| `0x1D38B10` | Material to terrain map, 8-byte entries |
+| `0x1D38F10` | Entry count for that map |
+| `0x1B9F4B8` | Sound effect bank records, stride `0x54` |
+| `0x8ED380` | Face paint icon ids, 23 dwords in equipped-face order |
+| `0x8EDCD0` | Uniform icon ids |
+| `0x8EDD60` | Uniform icon ids, 128x64 variants |
+| `0x8D1DB0` | Uniform byte to item id pairs |
+| `0x8D1CF0` | Face byte to item id pairs |
+
+## Functions
+
+| RVA | Signature |
+| --- | --- |
+| `0x10EDC0` | `dispatch(target, message, data)` |
+| `0x9BFA0` | `asset_id(type, index)` |
+| `0xE1650` | `request(type)` returns pool |
+| `0xE1660` | `set_mode(queue, mode)` |
+| `0xE17C0` | `set_id(queue, asset)` |
+| `0xE1680` | `finish(queue, slot)` returns handle |
+| `0xE1970` | `busy()` |
+| `0xE16B0` | `finalize(queue, mode)` |
+| `0x304050` | `finalize(entry, mode)`, wraps `0xE16B0` with the heap bracket |
+| `0x113B00` | `find_asset(slot)` |
+| `0x2F8D0` | `prepare_face(asset)` |
+| `0xC3600` | `apply_face(slot, id, prepared)` |
+| `0x2FDB00` | `refresh_equipment()` |
+| `0x725CD0` | `yield(duration)`, task-context yield |
+| `0x1143F0` | `set_heap(index)`, one instruction: `mov [0x1D7A550], ecx` |
+| `0x113F90` | Allocator. `cmovs edi, [0x1D7A550]` when asked for heap `-1` |
+| `0x114300` | Initialise one heap descriptor |
+| `0x114280`, `0x114420` | Free into the heap table |
+| `0x9BA40` | `uniform_item(byte)` |
+| `0x9BA70` | `face_item(byte)` |
+| `0x9BBE0` | `item_id(item)`, reads item record `+0x20` |
+| `0xA8070` | Compute camouflage index |
+| `0xA88F0` | `terrain(material)` |
+| `0x359020` | `state_bit(bit)` against `0x1E16CF8` |
+| `0x9ECC0` | `play_sound(cue)` |
+| `0x10ECF0` | Read `GV_PauseLevel` |
+| `0x10ED00` | Clear bits, `and not ecx` |
+| `0x10ED10` | Set bits, `or ecx` |
+| `0x10EE10` | `GV_ExecActor`, tests actor pause masks at `0x10F0FF` |
+| `0x9BDA0` | Area asset loader |
+
+## Structures
+
+Player stats, via `[0xACDE98]`:
+
+| Offset | Field |
+| --- | --- |
+| `+0x24` | Area code, 7 chars. `s*` and `v*` are gameplay stages |
+| `+0x5D6` | Area kind, word |
+| `+0x67E` | Equipped uniform |
+| `+0x67F` | Equipped face paint |
+
+Player record at `0x1E16CD0`, 0x80 bytes:
+
+| Offset | Field |
+| --- | --- |
+| `+0x24` | Camouflage index, tenths of a percent |
+| `+0x28` | State bitset, read by `0x359020` |
+
+Camouflage record, stride `0x18`, indexed by the equipped byte:
+
+| Offset | Field |
+| --- | --- |
+| `+0x00` | Internal name string |
+| `+0x08` | Value table |
+
+Uniform value tables are 27 terrains of 5 postures, signed bytes, then `0xFF`.
+Face paint value tables are one byte per terrain, then `0xFF`.
+
+Item record, stride `0x50` at `0x1D30B08`:
+
+| Offset | Field |
+| --- | --- |
+| `+0x10` | Category, 2 for uniforms |
+| `+0x20` | Own item id |
+| `+0x2C` | Asset id |
+
+Asset pool: 16-byte entries from `pool+0x10`, dword asset id at `+0x00`, queue
+pointer at `+0x08`.
+
+Material to terrain map: 8-byte entries, int key then uint16 value. A zero key
+is the fallback.
+
+## Messages
+
+| Id | Meaning |
+| --- | --- |
+| `0x1A0001` | Begin uniform change |
+| `0x1A0002` | Uniform asset handle |
+| `0x1A000F` | Begin face paint change |
+| `0x1A0014` | Refresh camouflage |
+| `0x140025` | Sent by the Viewer to `[this+0x220]`, not required outside it |
+
+Asset types: uniform `0x602F5702`, face paint `0x609B53C5`. Slots: uniform
+`0x0D413AA8`, face `0x00413AA8`. Face resource `0x6903A157`, id `0x0003A157`.
+
+## Change protocol
+
+Both the uniform and the face paint must be reloaded. Writing the equipped byte
+alone updates labels and the camouflage index but not the mesh; running only the
+uniform phase works once and leaves the composite model unsafe for a second
+change.
+
+1. Write the uniform to stats `+0x67E`.
+2. Dispatch `0x1A0001`.
+3. `asset_id(0x602F5702, uniform)`.
+4. `request`, `set_mode(queue, 2)`, `set_id(queue, asset)`.
+5. `yield(0x106)` while `busy()`.
+6. `finalize(entry, 2)`, then `finish(queue, 0x0D413AA8)`.
+7. Dispatch `0x1A0002` with the handle.
+8. Clear stats `+0x67F`, dispatch `0x1A000F`.
+9. Load the face asset through the same queue, pump and finalize path.
+10. Restore stats `+0x67F`, `refresh_equipment()`, then `find_asset`,
+    `prepare_face`, `apply_face`.
+11. Next frame, dispatch `0x1A0014`.
+
+Load before dispatching `0x1A0001`. That message begins a change the game
+expects `0x1A0002` to finish with a real handle; failing the load after it has
+gone out leaves the player mid-change and wedges the next attempt.
+
+No settle delay is needed. Neither native path has a timer: `0x3008C0` returns
+to state 0 as soon as its last state finishes, and the path at `0x323xxx` waits
+only on `0x2FF400`, which reads the Viewer context and so answers no during
+gameplay. Once the sequence above returns, both assets are pumped to completion
+and every dispatch has gone out; the only remaining dependency is the player
+consuming them on its own tick.
+
+Dispatch `0x1A0014` to the Snake actor as well as the player. Native sends it to
+both; the second target can be latched from any `0x1A0014` the game sends
+somewhere other than the player slot.
+
+## Allocator heap
+
+`0x1143F0` selects which heap the allocator uses for callers asking for heap
+`-1`. Message handlers allocate, so dispatches are bracketed with it.
+
+The Viewer brackets as `set(0)` ... `set(1)` because its screen runs with the
+ambient heap already at 1, and its teardown at `0x303169` writes 0 back. During
+gameplay the ambient heap is 0, so copying that pair leaves the index at 1
+permanently, every later allocation lands in the wrong arena, and the next area
+transition never finishes: `0x9BDA0` sits in its pump loop at `0x9BF40` while
+the rest of the game keeps rendering. Save and restore the ambient value.
+
+## Asset system
+
+Request mode belongs to the game, not to a change. `0xE1660` shows the uniform
+and face queues put into mode 2 from `0x9BF23` seconds before any change runs,
+and opening the Viewer puts twelve queues into mode 2 from `0x11016E`. A change
+passing `mode(queue, 2)` is therefore redundant; restoring mode 1 afterwards
+destroys game state and crashes within seconds.
+
+`0x725CD0` is a task-context yield, not a task pump. `0x22190` finds the current
+context by scanning the table at `0x103BC60`, stride `0x90`, for the pointer in
+`0x1044C60`. `0x725CD0` compares that index against 1: on a match it runs the
+scheduler and ignores its argument, otherwise it treats the argument as a
+duration. So `0x106` is a duration, not a category mask. `while (busy())
+yield(0x106)` is the game's own pattern, used by the area loader at `0x9BF40`.
+
+`0x9BDA0` scans its pool for asset ids already resident, then for each remaining
+id takes a free entry and runs `set_mode`, `set_id`, pump, `0xE16B0(queue, 2)`.
+
+## Survival Viewer
+
+`0x3008C0` is the uniform change, `0x300E50` the face change. `0x3008C0` is a
+jump-table state machine, index at `[this+0x26D8]`, table at `0x300BC8`, one
+step per frame, returning without advancing while the asset system is busy.
+
+| State | RVA | Action |
+| --- | --- | --- |
+| 2 | `0x3008FE` | Write `[this+0x218]` to stats `+0x67E`, `refresh_equipment()` |
+| 3 | `0x30093D` | Dispatch `0x1A0001` |
+| 7 | `0x300A10` | Resolve asset id, `request`, `set_mode`, `set_id` |
+| 8 | `0x300A83` | Wait on `busy()`, finalize, finish, dispatch `0x140025` then `0x1A0002`, branch on bit 11 of the uniform flags to clear the face byte and dispatch `0x1A000F` |
+
+`0x302FB0` through `0x303070`, `0x3030B0`, `0x3030F0` and `0x3031B8` is the
+Viewer screen closing, not change completion. It restores pause and UI globals,
+zeroes `0x1E15760` and sends `0x1A0014`. The `set_mode(queue, 1)` and `0x114280`
+at `0x3030CF` act on the Viewer's own queue, `[[this+0x50]+0x10]`, never on a
+request queue. Passing a request queue to `0x114280` writes a free-list link
+over its name string and kills the game shortly after.
 
 ## Camouflage index
 
-The index the HUD shows lives at `0x1E16CF4`, in tenths of a percent, so `1000`
-is 100%. That is the player record at `kPlayerSlot` (`0x1E16CD0`), which is
-0x80 bytes: `+0x24` is the index and `+0x28` the state bitset. `0xA8070`
-computes it and `0x358CEB` stores it.
-
-It is a sum of independent terms:
+Stored at `0x1E16CF4` in tenths of a percent, so `1000` is 100%. Computed by
+`0xA8070`, stored by `0x358CEB`.
 
     index = uniform_value * 10 + face_value * 10 + movement_penalty + light
 
-Only the first term depends on the uniform and only the second on the face
-paint, and neither depends on the other. So ranking uniforms is exact, the
-difference between two of them is exact, and the best pairing needs no search:
-it is the best uniform together with the best face paint.
+The terms are independent. Ranking uniforms and differencing two of them is
+exact, and the best pairing needs no search: it is the best uniform with the
+best face paint.
 
-Values come from one 0x18-byte record per uniform at `0x1E216E0` and per face
-paint at `0x1E214A0`, indexed by the equipped byte. `+0x00` is the internal
-name, `+0x08` the value table. A uniform's table is 27 terrains of 5 postures,
-signed bytes, plus an `0xFF` terminator; a face paint's is one byte per terrain.
+Uniform value index is `terrain * 5 + posture`; face paint value index is
+`terrain`.
 
-The posture, and which surface it is read against, follow the state bits
-`0x359020` queries -- that function is only `(bitset[bit / 32] >> (bit % 32)) & 1`
-against `0x1E16CF8`.
-
-| condition | surface | slot |
+| Condition | Surface | Posture |
 | --- | --- | --- |
-| bit `0x3B`, on a wall | wall material | 3, or 4 crouched |
-| prone: bit `3` and not bit `0xA9` | ground material | 2 |
-| crouched: bit `2` | ground material | 1 |
-| otherwise | ground material | 0 |
+| State bit `0x3B`, on a wall | Wall | 3, or 4 crouched |
+| State bit `3` and not bit `0xA9` | Ground | 2 |
+| State bit `2` | Ground | 1 |
+| Otherwise | Ground | 0 |
 
-The two surface materials are republished every frame at `0x1D38AF8` (ground)
-and `0x1D38AFC` (wall). `0xA88F0` maps a material to a dense terrain index by
-scanning the table at `0x1D38B10`, whose entry count is at `0x1D38F10`: 8-byte
-entries of an int key and a uint16 value, with a zero key acting as the
-fallback. On a miss it calls back into game code, so the mod reimplements the
-scan read-only rather than calling it from the render thread, and treats a miss
-as no data.
+`0xA88F0` maps a material to a dense terrain index. On a miss it calls back into
+game code, so a render thread should reimplement the scan read-only and treat a
+miss as no data.
 
-Worked example, verified live: equipped uniform 0, ground material `4315316`,
-standing. The material maps to terrain 11, so the slot is `11 * 5 + 0 = 55`;
-Olive Drab's table holds `0x0F` there; `15 * 10 = 150`, and `0x1E16CF4` read
-150.
+Worked example: uniform 0, ground material `4315316`, standing. Terrain 11, slot
+`11 * 5 + 0 = 55`, Olive Drab's table holds `0x0F` there, and `0x1E16CF4` reads
+`150`.
 
-## Uniform and face paint inventory
+## Uniforms and face paints
 
-`0x9BA40` maps an equipped-uniform byte to an item id and `0x9BA70` does the
-same for face paints: uniforms are items 41..73 and face paints 74..96, both
-8-byte key/value pairs in tables at `0x8D1DB0` and `0x8D1CF0`. Item records
-themselves are 0x50 bytes at `0x1D30B08`, with the item's own id at `+0x20` --
-which is what `0x9BBE0` returns -- and its asset id at `+0x2C`.
+Uniforms are items 41 to 73, face paints 74 to 96. The ownership table found by
+signature is a different table of the same `0x50` stride, indexed one lower:
+uniforms start at entry 40 and face paints at entry 73, and capacity of at least
+one means owned.
 
-The ownership table the mod finds by signature is a different table with the
-same 0x50 stride, and it is indexed one lower than those item ids: uniforms
-start at entry 40 and face paints at entry 73. Capacity of at least one means
-owned. Getting this wrong by one shifts every entry onto its neighbour's
-ownership, which reads as unlocked camouflage appearing in the menu.
+Face paints in equipped order: no paint, woodland, black, water, mountain,
+splitter, snow, kabuki, zombie, oyama, mask, green, brown, infinity, soviet
+union, united kingdom, france, germany, italy, spain, sweden, japan, usa.
+
+Face paint icons, 128x64 tiles in `textures/flatlist/_win`, from `0x8ED380`:
+
+| Face paint | Icon | Face paint | Icon |
+| --- | --- | --- | --- |
+| no paint | `000a365b` | brown | `00ac362b` |
+| woodland | `0042367f` | infinity | `004c3656` |
+| black | `00e9362a` | soviet union | `0011366c` |
+| water | `0092367d` | united kingdom | `008dab1c` |
+| mountain | `00113632` | france | `00a3363b` |
+| splitter | `006a366f` | germany | `0010363e` |
+| snow | `002d366f` | italy | `00df3647` |
+| kabuki | `0080364d` | spain | `005f366f` |
+| zombie | `0000368b` | sweden | `00433670` |
+| oyama | `008b3660` | japan | `006c364b` |
+| mask | `00c93657` | usa | `00bf3677` |
+| green | `00ac363f` | | |
+
+The uniform icon tables at `0x8EDCD0` and `0x8EDD60` do not match the list in
+`src/camo_swatch.cpp` index for index; ten of thirty-three differ and the order
+looks like Viewer display order. The hand-built list is correct on screen, but
+those tables are where to check if a swatch ever looks wrong.
+
+## Textures
+
+Every texture ships loose under `textures/flatlist/_win` in CTXR form:
+
+| Offset | Field |
+| --- | --- |
+| `0x00` | `TXTR` |
+| `0x04` | Version, big endian |
+| `0x08` | Width, big endian |
+| `0x0A` | Height, big endian |
+| `0x80` | Byte count, big endian, then the top mip as raw BGRA |
+
+Alpha follows the PS2 convention: `0x80` is opaque, not `0xFF`. Lower mips use
+a different framing.
+
+Uniform camouflage icons are seamless 128x128 tiles named by asset id. Uniform
+bodies all share the source name `sna_def_olive.bmp`, so the flatlist holds one
+hashed copy per camouflage; each camouflage slot lists its own in
+`sp/slot/camoufla-<slot>/bp_assets.txt`, first field. Slot names use the
+original internal spelling: `normal`, `rain_stroke`, `garco`, `desert`,
+`animal`. Six uniforms are not BDU camouflage and carry their own body texture:
+naked, sneaking suit, scientist, officer, maintenance, tuxedo. Slots `cell`,
+`grenade` and `mummy` exist with no uniform id. The `banana` slot ships blank,
+as does its icon.
+
+Each `facepaint-*` slot lists one texture, mostly `0003a157.img_<hash>.ctxr`
+where `0003a157` is `sna_face_def`. `none` takes `sna_face_def.bmp.ctxr`,
+`brown` the unhashed `0003a157.img.ctxr`, and `mask` has none because it is a
+model swap.
+
+## HUD font
+
+`Misc/Layoutfont/_win/layoutfont.ctxr`, 960x200, 32 columns by 5 rows of 30x40
+cells, glyph shape in alpha only. Cell 0 is ASCII `0x20`; the first three rows
+cover printable ASCII and the last two hold accented Latin. Ink bands sit at y
+2, 42, 82, 121 and 161, pitch 40. Baselines align when each glyph is drawn
+across its whole cell, so only horizontal ink bounds need measuring.
+
+Colours sampled from the Viewer and the equipment HUD:
+
+| Element | Colour |
+| --- | --- |
+| Panel | `0A0A07` |
+| Frame, unselected row | `434335` |
+| Selected row | `A8A88C` |
+| Header text | `95957B` |
+| Bright HUD text | `A6A68F` |
+| Dim HUD text | `6E6E5E` |
 
 ## UI sound
 
-`0x9ECC0` plays a sound cue. It takes one argument, the cue id in `ecx`, and
-nothing else: it masks the id to eleven bits, tags it `0x43` and hands it to the
-mixer. The `Misc/BP_SE.DAT` bank behind it loads a table of 0x54-byte records at
-`0x1B9F4B8`, but no UI code touches that directly -- everything goes through this
-wrapper, which is what makes it usable from a mod.
+`0x9ECC0` takes a cue id in `ecx` and nothing else: it masks to eleven bits,
+tags `0x43` and hands it to the mixer. The `Misc/BP_SE.DAT` bank behind it is
+never touched directly by UI code. Cues must be played from the gameplay
+thread.
 
-Thirty-eight distinct cue ids are passed to it across the executable, and menu
-code overwhelmingly uses three of them: `0x1A00B` cursor, `0x1A00C` decide,
-`0x1A00D` back. The Survival Viewer's camouflage list is no exception, at
-`0x302628`, `0x302656` and `0x302710`.
+| Cue | Meaning | Sites |
+| --- | --- | --- |
+| `0x1A008` | Wheel open | `0x32DA49`, `0x32E6C6` |
+| `0x1A009` | Wheel close | `0x32D361`, `0x32E034` |
+| `0x1A00B` | Cursor | `0x302628` |
+| `0x1A00C` | Decide | `0x302656` |
+| `0x1A00D` | Back | `0x302710` |
+| `0x300F` | Operation not permitted | |
 
-The weapon and item wheels are the closer model for a quick menu, and they have
-their own pair. Both wheel modules play `0x1A008` immediately after taking the
-`GV_PauseLevel` wheel bit, at `0x32DA49` and `0x32E6C6`, and `0x1A009` on the
-way out, at `0x32D361` and `0x32E034`. Searching for a `0x9ECC0` call just after
-a `set_pause(4)` is what found them; scanning for `mov ecx, imm32` immediately
-before the call does not, because one of the two sites has an unrelated store
-in between.
+Thirty-eight distinct cue ids are passed to `0x9ECC0` across the executable;
+menu code overwhelmingly uses the middle three. The wheel pair was found by
+looking for a `0x9ECC0` call just after a `set_pause(4)`. Scanning for
+`mov ecx, imm32` immediately before the call misses one of the two wheel sites,
+which has an unrelated store in between.
 
-`0x300F` is the "operation not permitted" sound, useful for a refused action.
+## Pause level
 
-Calls must be made from the gameplay thread. The menu runs on the render thread,
-so it posts a cue and the frame hook plays it.
+Weapon and item wheels move `GV_PauseLevel` from `0` to `4` and back.
+`GV_ExecActor` tests each actor's pause mask against it at `0x10F0FF`;
+intersecting actors stop while wheel UI and audio actors continue. Setting and
+clearing bit 2 alone reproduces that without stopping threads, fibers,
+rendering or audio.
 
 ## Player state flags
 
-`0x1E21AB0` and `0x1E21AB4` are the game's global player-state flags. They are
-read as a pair and tested against a mask at hundreds of call sites, each mask
-naming the states that particular action must not interrupt:
+`0x1E21AB0` and `0x1E21AB4` are read as a pair and tested against a mask at
+hundreds of sites, each mask naming the states that action must not interrupt:
 
     mov eax, [0x1E21AB4]
     or  eax, [0x1E21AB0]
     test eax, <mask>
     jne  <refuse>
 
-The masks that matter here belong to the wheel-style popups, because they take
-the same `GV_PauseLevel` wheel bit the quick menu takes and so share its
-precondition exactly: `0xFE000200` at `0x6CA3EA` and `0x6E074D`, `0x86000200`
-at `0x6DA4EB`. The mod copies the stricter one.
+| Mask | Sites |
+| --- | --- |
+| `0xFE000200` | `0x6CA3EA`, `0x6E074D` |
+| `0x86000200` | `0x6DA4EB` |
+| `0x78000000` | 12 sites from `0x2455F5` |
+| `0x06000000` | 10 sites from `0x39C91C` |
+| `0x18000000` | 4 sites from `0x33F172` |
 
-Measured against a running game, 2141 samples at 10Hz across four areas and
-several cutscenes: the allowed side is a single value, `0x01000080`, in all
-1376 of its samples, and the blocked side has five, `0x01000200`, `0x03000200`,
-`0x05000080`, `0x09000200` and `0x11000200`, in 765. The two sets do not
-overlap.
+The first two belong to the wheel-style popups, which take the same
+`GV_PauseLevel` bit a quick menu takes, so their precondition is the one to
+copy.
 
-Bit 9 is the obvious cutscene bit and is set in most blocked states, but
-`0x05000080` has it clear and is caught only by bit 26. Copying the game's mask
-rather than the one bit that looked sufficient is what covers that case.
+Observed over 2141 samples at 10Hz across four areas and several cutscenes: the
+permitted state is a single value, `0x01000080`; blocked states are
+`0x01000200`, `0x03000200`, `0x05000080`, `0x09000200` and `0x11000200`. Bit 9
+reads as the cutscene bit but `0x05000080` has it clear and is caught only by
+bit 26, so the mask matters and the single bit does not suffice.
 
-This is what the area code could not do. Scripted sequences inside an ordinary
-stage keep the stage's own area code -- blocked stretches show up in `v001a`
-and `v003a`, not just in the cutscene-suffixed `v004a_0` -- so before this the
-gate let the menu open during them, and the wheel pause bit it set corrupted
-the sequence.
+Cutscenes keep their stage's area code, so an area check cannot substitute:
+blocked stretches occur in `v001a` and `v003a`, not only in `v004a_0`.
+
+## Menu gating
+
+Signals for "playable gameplay", all read-only and checked fail-closed:
+
+| Signal | Blocks when |
+| --- | --- |
+| Stats area code `+0x24` | First char is not `s` or `v` |
+| Viewer context `0x1E14AE0` | Non-null |
+| `GV_PauseLevel` | Any bit outside the wheel bit; the wheel bit too on the opening edge |
+| Player state flags | `(A \| B) & 0xFE000200` is non-zero |
+
+## Pad input
+
+The pad reaches the process only through Steam Input. The executable imports
+`GetAsyncKeyState` and `GetKeyState` from USER32 and no other input API; it and
+`Engine.dll` pull `SteamInput006` through
+`SteamInternal_FindOrCreateUserInterface`. XInput reports
+`ERROR_DEVICE_NOT_CONNECTED` on all four slots, the winmm joystick API
+enumerates nothing, and DirectInput 8 enumerates nothing under
+`DI8DEVCLASS_GAMECTRL`. `DI8DEVCLASS_ALL` finds only "Wine Mouse", which is a
+trap.
+
+The game uses the C++ interface, so hooking the flat `SteamAPI_ISteamInput_*`
+exports catches nothing. Those exports are still useful as documentation: each
+is a thunk of the form `mov rax,[rcx]; jmp [rax+disp]`, which gives vtable
+offsets without guessing at an SDK layout.
+
+| Method | Offset | Slot |
+| --- | --- | --- |
+| `RunFrame` | `0x18` | 3 |
+| `GetConnectedControllers` | `0x30` | 6 |
+| `GetActionSetHandle` | `0x48` | 9 |
+| `GetDigitalActionHandle` | `0x80` | 16 |
+| `GetDigitalActionData` | `0x88` | 17 |
+| `GetDigitalActionOrigins` | `0x90` | 18 |
+
+`GetDigitalActionData` returns two bytes through a hidden pointer, which the
+flat wrapper makes plain with a `lea rdx,[rsp+0x30]` ahead of the call.
+
+The game polls sixteen digital actions every frame, handles 1 to 16.
+`GetStringForDigitalActionName` names them in Xbox terms:
+
+| Handle | Name | PlayStation |
+| --- | --- | --- |
+| 1 | `Y Button` | triangle |
+| 2 | `B Button` | circle |
+| 3 | `X Button` | square |
+| 4 | `A Button` | cross |
+| 5 to 8 | `Arrow Up/Right/Down/Left` | D-pad |
+| 9, 10 | Stick buttons | L3, R3 |
+| 11, 12 | `L1 Button`, `R1 Button` | L1, R1 |
+| 13, 14 | `L2 Button`, `R2 Button` | L2, R2 |
+| 15, 16 | `Back Button`, `Start Button` | select, start |
+
+Those display names are not what `GetDigitalActionHandle` accepts; it wants the
+identifier from the game's action manifest, which is neither on disk nor in the
+binary's strings. Walk handles 1 to 64 and match on the reported name instead.
+Sticks are analog actions whose names are not among the digital sixteen.
+
+## PC control map
+
+The keyboard prompt art is ground truth for pad mapping:
+`textures/flatlist/ovr_stm/ctrltype_kbd/_win` replaces cross with `Enter`,
+triangle with `E`, square with `Q` and R1 with a right-click mouse icon. The
+`type_a` and `type_b` subdirectories give R2 as `2` or `R` and L2 as `1` or `Q`.
+
+Layout A takes W A S D, Left Ctrl, Left Shift, Space, E, F, H, M, N, O, U,
+I J K L, 1, 2, 9, 0, Tab, Esc and both mouse buttons. Layout B takes the same
+movement keys plus C, E, N, O, Q, R, V, 1, 2, Tab, Esc, the wheel click and both
+mouse buttons. `G` and the arrow keys are free in both. `Esc` is Codec Mode, so
+it cannot serve as a close key.
+
+## Constraints
+
+| Approach | Result |
+| --- | --- |
+| Write the stats byte only | Labels and index change, mesh does not |
+| Stats byte plus `0x1A0014` | Same |
+| Asynchronous uniform queue outside the Viewer | Crashes, no pump or finalize phase |
+| Uniform reload without face reload | First change works, second crashes |
+| Preload two uniforms into the pool | Pool exposes one active slot |
+| Restore request queues to mode 1 | Crashes within seconds |
+| Pass a request queue to `0x114280` | Corrupts the queue, crashes |
+| Copy the Viewer's `set(0)`/`set(1)` heap bracket | Next area transition never finishes |
 
 ## External references
 
