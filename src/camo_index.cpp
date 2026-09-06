@@ -71,9 +71,4 @@ int face_value(uintptr_t base, int slot, uint8_t face)
     return mem::read<int8_t>(values + terrain) * 10;
 }
 
-int camo_index(uintptr_t base)
-{
-    return mem::read<int>(base + mgs3::kCamoIndex);
-}
-
 } // namespace qcamo

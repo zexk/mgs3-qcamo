@@ -16,6 +16,7 @@
 #include <cstring>
 #include <string>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "camo_index.h"
@@ -90,7 +91,6 @@ bool pressed(int key)
 // interface, so its action names are the contract here; they were read back
 // with GetStringForDigitalActionName off the handles it polls.
 struct Pad {
-    bool present;
     bool shoulder; // L1
     bool open_button; // triangle
     bool equip; // cross
@@ -173,7 +173,6 @@ Pad read_pad()
     auto down = [](uint64_t action) {
         return action && (steam_pad.data(steam_pad.self, steam_pad.controller, action) & 0xFF) != 0;
     };
-    pad.present = true;
     pad.shoulder = down(steam_pad.shoulder);
     pad.open_button = down(steam_pad.triangle);
     pad.equip = down(steam_pad.cross);
@@ -191,9 +190,9 @@ bool pressed_any(int first, int second)
     return a || b;
 }
 
-constexpr int wrapped(int selected, int count, int step)
+constexpr int wrapped(int index, int count, int step)
 {
-    return (selected + count + step) % count;
+    return (index + count + step) % count;
 }
 
 static_assert(wrapped(0, 3, -1) == 2 && wrapped(2, 3, 1) == 0);
@@ -233,17 +232,16 @@ constexpr int kFirstUniformEntry = 40;
 constexpr int kFirstFaceEntry = kFirstUniformEntry + int(kUniformNames.size());
 static_assert(kFirstFaceEntry == 73);
 
+std::vector<uint8_t> owned_uniform_cache{0, 1};
+std::vector<uint8_t> owned_face_cache{0};
+uint64_t inventory_revision;
+uint64_t inventory_refresh_at;
+
 std::vector<uint8_t> owned_items(size_t count, int first_item)
 {
-    static uint64_t retry_at;
-    uint64_t now = GetTickCount64();
-    if (!inventory && now >= retry_at) {
-        inventory = find_inventory();
-        retry_at = now + 2000;
-        if (inventory) LOG_INFO("inventory table found after startup");
-    }
     std::vector<uint8_t> result;
     if (!inventory) return result;
+    result.reserve(count);
     for (uint8_t id = 0; id < count; ++id) {
         auto entry = inventory + (first_item + id) * 80;
         if (mem::range_readable(entry, sizeof(int16_t)) && mem::read<int16_t>(entry) >= 1) {
@@ -253,32 +251,32 @@ std::vector<uint8_t> owned_items(size_t count, int first_item)
     return result;
 }
 
-std::vector<uint8_t> owned_uniforms()
+void refresh_owned_items()
 {
-    auto result = owned_items(kUniformNames.size(), kFirstUniformEntry);
-    if (result.empty()) result = {0, 1};
-    return result;
-}
+    uint64_t now = GetTickCount64();
+    if (now < inventory_refresh_at) return;
+    // ponytail: one-second polling; hook inventory writes only if pickup latency matters.
+    inventory_refresh_at = now + 1000;
+    if (!inventory) {
+        inventory = find_inventory();
+        if (inventory) LOG_INFO("inventory table found");
+    }
 
-// Bare skin always counts, so the list is never empty and the pairing always
-// has something to offer.
-std::vector<uint8_t> owned_faces()
-{
-    auto result = owned_items(kFaceNames.size(), kFirstFaceEntry);
-    if (result.empty() || result.front() != 0) result.insert(result.begin(), 0);
-    // Logged whenever the set changes: a wrong entry offset shows up here as
-    // names that do not match what the Survival Viewer lists.
-    static std::vector<uint8_t> logged;
-    if (result != logged) {
-        logged = result;
+    auto uniforms = owned_items(kUniformNames.size(), kFirstUniformEntry);
+    if (uniforms.empty()) uniforms = {0, 1};
+    auto faces = owned_items(kFaceNames.size(), kFirstFaceEntry);
+    if (faces.empty() || faces.front() != 0) faces.insert(faces.begin(), 0);
+    if (uniforms != owned_uniform_cache || faces != owned_face_cache) {
+        owned_uniform_cache = std::move(uniforms);
+        owned_face_cache = std::move(faces);
+        ++inventory_revision;
         std::string names;
-        for (uint8_t face : result) {
+        for (uint8_t face : owned_face_cache) {
             names += kFaceNames[face];
             names += ' ';
         }
         LOG_INFO("face paints owned: %s", names.c_str());
     }
-    return result;
 }
 
 // Face paint scores independently of the uniform, so one face is best for
@@ -287,7 +285,7 @@ uint8_t best_face(int slot)
 {
     uint8_t best = 0;
     int best_value = face_value(base, slot, 0);
-    for (uint8_t face : owned_faces()) {
+    for (uint8_t face : owned_face_cache) {
         int value = face_value(base, slot, face);
         if (value > best_value) {
             best_value = value;
@@ -304,12 +302,19 @@ const std::vector<uint8_t>& menu_uniforms()
 {
     static std::vector<uint8_t> rows;
     if (!open) {
-        rows = owned_uniforms();
+        static uint64_t rows_revision = UINT64_MAX;
+        static int previous_slot = -2;
+        refresh_owned_items();
         int slot = camo_slot(base);
-        std::stable_sort(rows.begin(), rows.end(), [slot](uint8_t a, uint8_t b) {
-            return camo_value(base, slot, a) > camo_value(base, slot, b);
-        });
-        paired_face = best_face(slot);
+        if (slot != previous_slot || rows_revision != inventory_revision) {
+            rows = owned_uniform_cache;
+            std::stable_sort(rows.begin(), rows.end(), [slot](uint8_t a, uint8_t b) {
+                return camo_value(base, slot, a) > camo_value(base, slot, b);
+            });
+            paired_face = best_face(slot);
+            previous_slot = slot;
+            rows_revision = inventory_revision;
+        }
     }
     return rows;
 }
@@ -343,12 +348,6 @@ void poll_menu(const std::vector<uint8_t>& uniforms)
     bool pad_down = fresh(&Pad::down);
     bool pad_equip = fresh(&Pad::equip);
     previous = pad;
-
-    static bool pad_seen;
-    if (pad.present != pad_seen) {
-        pad_seen = pad.present;
-        LOG_INFO("pad %s", pad.present ? "detected" : "disconnected");
-    }
 
     // Triangle plus L1 opens the menu and L1 alone keeps it up, because on a
     // pad every button is already spoken for. G is the keyboard stand-in.
@@ -417,7 +416,7 @@ void poll_menu(const std::vector<uint8_t>& uniforms)
 void draw_menu(const std::vector<uint8_t>& uniforms)
 {
     if (!open) return;
-    ImGuiIO& io = ImGui::GetIO();
+    const ImGuiIO& io = ImGui::GetIO();
     float scale = std::max(0.75f, std::min(io.DisplaySize.x / 1920.0f,
                                           io.DisplaySize.y / 1080.0f));
     ImDrawList* draw = ImGui::GetForegroundDrawList();
@@ -455,6 +454,7 @@ void draw_menu(const std::vector<uint8_t>& uniforms)
     float top = y + 2 * pad + header_height;
     int first = std::clamp(selected - 3, 0, count - visible);
     uint8_t equipped = equipped_uniform();
+    uint8_t equipped_face_id = equipped_face();
     int slot = camo_slot(base);
     for (int row = 0; row < visible; ++row) {
         int index = first + row;
@@ -462,7 +462,7 @@ void draw_menu(const std::vector<uint8_t>& uniforms)
         bool active = index == selected;
         // The HUD inverts the row Snake is wearing: olive on black rather than
         // black on olive, dim normally and bright under the cursor.
-        bool worn = id == equipped && paired_face == equipped_face();
+        bool worn = id == equipped && paired_face == equipped_face_id;
         ImU32 worn_ink = active ? kRowSelected : kRowWornText;
         ImVec2 row_min{inner, top + row * row_height};
         ImVec2 row_max{inner + inner_width, row_min.y + row_height - 3 * scale};
@@ -502,7 +502,7 @@ void draw_menu(const std::vector<uint8_t>& uniforms)
         // What swapping to the set would gain or lose. The absolute percentage
         // is already on the HUD, so only the difference is worth the row.
         int delta = camo_value(base, slot, id) + face_value(base, slot, paired_face) -
-                    camo_value(base, slot, equipped) - face_value(base, slot, equipped_face());
+                    camo_value(base, slot, equipped) - face_value(base, slot, equipped_face_id);
         if (delta == 0) continue;
         char change[8];
         std::snprintf(change, sizeof(change), "%+d", delta / 10);
@@ -522,7 +522,7 @@ void draw_menu(const std::vector<uint8_t>& uniforms)
     hud_dpad(draw, {cursor, hint_y}, hint_height, kHint);
     cursor += hint_height + 4 * scale;
     label("SELECT");
-    if (auto* icon = hud_button(device, HudButton::Cross)) {
+    if (auto* icon = hud_cross_button(device)) {
         // The button art carries its own padding, so it reads right a little
         // larger than the cap height beside it.
         float glyph = hint_height * 1.8f;
@@ -551,12 +551,28 @@ bool init_renderer(IDXGISwapChain* swap_chain)
     if (FAILED(swap_chain->GetDevice(IID_PPV_ARGS(&device)))) return false;
     device->GetImmediateContext(&context);
     DXGI_SWAP_CHAIN_DESC desc{};
-    if (FAILED(swap_chain->GetDesc(&desc)) || !create_render_target(swap_chain)) return false;
+    if (FAILED(swap_chain->GetDesc(&desc)) || !create_render_target(swap_chain)) {
+        context->Release();
+        device->Release();
+        context = nullptr;
+        device = nullptr;
+        return false;
+    }
     ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouse | ImGuiConfigFlags_NoMouseCursorChange;
-    ImGui_ImplWin32_Init(desc.OutputWindow);
-    ImGui_ImplDX11_Init(device, context);
+    bool win32 = ImGui_ImplWin32_Init(desc.OutputWindow);
+    if (!win32 || !ImGui_ImplDX11_Init(device, context)) {
+        if (win32) ImGui_ImplWin32_Shutdown();
+        ImGui::DestroyContext();
+        render_target->Release();
+        context->Release();
+        device->Release();
+        render_target = nullptr;
+        context = nullptr;
+        device = nullptr;
+        return false;
+    }
     ready = true;
     LOG_INFO("quick menu renderer ready");
     return true;
@@ -564,7 +580,10 @@ bool init_renderer(IDXGISwapChain* swap_chain)
 
 HRESULT STDMETHODCALLTYPE present_hook(IDXGISwapChain* swap_chain, UINT interval, UINT flags)
 {
-    if (!ready && !init_renderer(swap_chain)) return original_present(swap_chain, interval, flags);
+    if ((!ready && !init_renderer(swap_chain)) ||
+        (ready && !render_target && !create_render_target(swap_chain))) {
+        return original_present(swap_chain, interval, flags);
+    }
     const auto& uniforms = menu_uniforms();
     poll_menu(uniforms);
     ImGui_ImplDX11_NewFrame();
@@ -586,7 +605,7 @@ HRESULT STDMETHODCALLTYPE resize_hook(IDXGISwapChain* swap_chain, UINT count, UI
         render_target = nullptr;
     }
     HRESULT result = original_resize(swap_chain, count, width, height, format, flags);
-    if (SUCCEEDED(result) && ready) create_render_target(swap_chain);
+    if (ready) create_render_target(swap_chain);
     return result;
 }
 
@@ -648,8 +667,8 @@ bool start_overlay(uintptr_t image_base, QueueUniform callback)
 {
     base = image_base;
     queue_uniform = callback;
-    inventory = find_inventory();
-    LOG_INFO("inventory table %s", inventory ? "found" : "not found; using POC uniforms");
+    refresh_owned_items();
+    if (!inventory) LOG_INFO("inventory table not found; using POC uniforms");
     return install_hooks();
 }
 

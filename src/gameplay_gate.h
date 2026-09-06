@@ -94,9 +94,4 @@ inline bool can_open_menu(uintptr_t base)
     return gate_state(base, false) == GateBlock::None;
 }
 
-inline bool stay_open(uintptr_t base)
-{
-    return gate_state(base, true) == GateBlock::None;
-}
-
 } // namespace qcamo

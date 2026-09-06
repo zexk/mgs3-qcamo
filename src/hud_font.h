@@ -7,12 +7,8 @@ struct ID3D11ShaderResourceView;
 
 namespace qcamo {
 
-// PlayStation face buttons, from the prompt art the game swaps per controller
-// type. The unqualified textures are the original PS2 art; only the circle has
-// to come from an override set, because western builds never show it.
-enum class HudButton { Cross, Triangle, Circle, Square };
-
-ID3D11ShaderResourceView* hud_button(ID3D11Device* device, HudButton button);
+// Cross-button prompt from the game's original PS2 art.
+ID3D11ShaderResourceView* hud_cross_button(ID3D11Device* device);
 
 // MGS3 ships no art for a shoulder-button prompt other than R1, and none at all
 // for the D-pad, so these two are drawn in the style of that R1 tile.

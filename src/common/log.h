@@ -1,9 +1,6 @@
 // Copied from bbtracker (../bbtracker/src/common/log.h), MIT licensed.
 #pragma once
 
-#include <cstddef>
-#include <cstdint>
-
 namespace qcamo {
 
 enum class LogLevel : int {
@@ -14,7 +11,6 @@ enum class LogLevel : int {
 };
 
 bool log_init(const char* path);
-void log_shutdown();
 void log_write(LogLevel lvl, const char* fmt, ...)
 #if defined(__GNUC__) || defined(__clang__)
     __attribute__((format(printf, 2, 3)))

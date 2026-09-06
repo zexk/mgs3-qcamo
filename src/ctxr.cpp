@@ -15,7 +15,8 @@ std::vector<uint8_t> read_file(const std::filesystem::path& path)
 {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) return {};
-    auto size = static_cast<std::streamsize>(file.tellg());
+    auto size = file.tellg();
+    if (size <= 0) return {};
     std::vector<uint8_t> data(static_cast<size_t>(size));
     file.seekg(0);
     file.read(reinterpret_cast<char*>(data.data()), size);
@@ -27,8 +28,6 @@ uint32_t read_be32(const uint8_t* at)
     return (uint32_t(at[0]) << 24) | (uint32_t(at[1]) << 16) | (uint32_t(at[2]) << 8) | at[3];
 }
 
-} // namespace
-
 const std::filesystem::path& game_dir()
 {
     static std::filesystem::path dir = [] {
@@ -38,6 +37,8 @@ const std::filesystem::path& game_dir()
     }();
     return dir;
 }
+
+} // namespace
 
 // CTXR: "TXTR" magic, big-endian dimensions at 0x08, then a big-endian byte
 // count followed by the top mip level as BGRA. Later mip levels use a different
@@ -53,8 +54,9 @@ Image load_ctxr(const std::filesystem::path& relative)
     }
     Image image{(file[8] << 8) | file[9], (file[10] << 8) | file[11], {}};
     uint32_t bytes = read_be32(file.data() + kMip0);
+    uint64_t expected = uint64_t(image.width) * image.height * 4;
     if (image.width <= 0 || image.height <= 0 ||
-        bytes != uint32_t(image.width) * image.height * 4 || file.size() < kMip0 + 4 + bytes) {
+        bytes != expected || file.size() < kMip0 + 4 + bytes) {
         LOG_WARN("unreadable texture: %s", path.string().c_str());
         return {};
     }

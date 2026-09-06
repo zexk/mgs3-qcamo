@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <filesystem>
 
 #include "common/log.h"
 #include "ctxr.h"
@@ -92,26 +91,19 @@ bool hud_font_ready(ID3D11Device* device)
     return atlas != nullptr;
 }
 
-ID3D11ShaderResourceView* hud_button(ID3D11Device* device, HudButton button)
+ID3D11ShaderResourceView* hud_cross_button(ID3D11Device* device)
 {
-    static const std::array<std::filesystem::path, 4> kPaths{
-        std::filesystem::path("textures/flatlist/_win/004a230b.ctxr"),
-        std::filesystem::path("textures/flatlist/_win/0053d847.ctxr"),
-        std::filesystem::path("textures/flatlist/ovr_stm/ctrltype_ps4/ovr_jp/_win/00ddd547.ctxr"),
-        std::filesystem::path("textures/flatlist/_win/00e9d866.ctxr"),
-    };
-    static std::array<ID3D11ShaderResourceView*, 4> views;
-    static std::array<bool, 4> resolved;
-    auto index = static_cast<size_t>(button);
-    if (!resolved[index]) {
-        resolved[index] = true;
-        Image image = load_ctxr(kPaths[index]);
+    static ID3D11ShaderResourceView* view;
+    static bool resolved;
+    if (!resolved) {
+        resolved = true;
+        Image image = load_ctxr("textures/flatlist/_win/004a230b.ctxr");
         if (image) {
             whiten(image);
-            views[index] = create_texture(device, image.width, image.height, image.pixels);
+            view = create_texture(device, image.width, image.height, image.pixels);
         }
     }
-    return views[index];
+    return view;
 }
 
 float hud_text_width(const char* text, float height)

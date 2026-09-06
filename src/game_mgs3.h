@@ -58,9 +58,7 @@ inline constexpr uint32_t kAreaSize = 7;
 inline constexpr uint32_t kViewerSlot = 0x1E14AE0;
 
 // Camouflage. The player record starts at kPlayerSlot and is 0x80 bytes; the
-// per-actor camouflage index the HUD shows sits at +0x24 in tenths of a
-// percent, and the state bitset 0x359020 queries sits at +0x28.
-inline constexpr uint32_t kCamoIndex = 0x1E16CF4;
+// state bitset 0x359020 queries sits at +0x28.
 inline constexpr uint32_t kPlayerState = 0x1E16CF8;
 inline constexpr int kStateCrouch = 2;
 inline constexpr int kStateProne = 3;

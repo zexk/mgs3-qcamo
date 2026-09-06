@@ -24,7 +24,4 @@ int camo_value(uintptr_t base, int slot, uint8_t uniform);
 // slot names rather than the slot itself.
 int face_value(uintptr_t base, int slot, uint8_t face);
 
-// The whole index the HUD is showing, in tenths of a percent.
-int camo_index(uintptr_t base);
-
 } // namespace qcamo

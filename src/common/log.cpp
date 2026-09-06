@@ -43,14 +43,6 @@ bool log_init(const char* path)
     return true;
 }
 
-void log_shutdown()
-{
-    if (g_file) {
-        fclose(g_file);
-        g_file = nullptr;
-    }
-}
-
 void log_write(LogLevel lvl, const char* fmt, ...)
 {
     if (!g_file) {

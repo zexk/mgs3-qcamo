@@ -127,11 +127,13 @@ void* load_asset(uint32_t type, int id)
     // The game's own area loader waits the same way at 0x9BF40, so re-entering
     // the scheduler from here is the sanctioned pattern rather than a hack.
     int pumps = 0;
-    while (busy() && pumps++ < 10000) {
+    while (pumps < 10000 && busy()) {
         pump(0x106);
+        ++pumps;
     }
-    LOG_INFO("asset %08X: %d pumps%s", id, pumps, busy() ? " (still busy)" : "");
-    if (busy()) {
+    bool still_busy = busy();
+    LOG_INFO("asset %08X: %d pumps%s", id, pumps, still_busy ? " (still busy)" : "");
+    if (still_busy) {
         return nullptr;
     }
     game_function<void(__fastcall*)(void*, int)>(qcamo::mgs3::kFinalizeAsset)(
@@ -142,7 +144,7 @@ void* load_asset(uint32_t type, int id)
 void change_camo(uint8_t next, uint8_t next_face)
 {
     auto stats = qcamo::mem::read<uintptr_t>(image_base + qcamo::mgs3::kStatsSlot);
-    auto player = qcamo::mem::read<void*>(image_base + qcamo::mgs3::kPlayerSlot);
+    auto player = qcamo::mem::read<uintptr_t>(image_base + qcamo::mgs3::kPlayerSlot);
     if (!stats || !player || !qcamo::mem::range_readable(stats, 0x680)) {
         change_busy = false;
         LOG_WARN("uniform change ignored: gameplay state unavailable");
@@ -217,23 +219,21 @@ void change_camo(uint8_t next, uint8_t next_face)
 intptr_t __fastcall dispatch_hook(void* target, uint32_t message, void* data)
 {
     auto result = original_dispatch(target, message, data);
-    auto caller = reinterpret_cast<uintptr_t>(__builtin_return_address(0)) - image_base;
-    if (((message >> 16) & 0xFFu) == 0x1Au) {
-        // Latch the Snake-actor refresh target whenever native code sends
-        // one anywhere but the player slot.
-        if (message == qcamo::mgs3::kRefreshCamo) {
-            auto player =
-                qcamo::mem::read<uintptr_t>(image_base + qcamo::mgs3::kPlayerSlot);
-            auto handle = reinterpret_cast<uintptr_t>(target);
-            if (player && handle && handle != player) {
-                latched_actor = handle;
-                latched_prefix = static_cast<uint32_t>(player & 0xFFFF0000u);
-                LOG_INFO("actor latch: %llX (prefix %04X)",
-                         static_cast<unsigned long long>(handle), latched_prefix >> 16);
-            }
+    // Latch the Snake-actor refresh target whenever native code sends one
+    // anywhere but the player slot.
+    if (message == qcamo::mgs3::kRefreshCamo) {
+        auto player = qcamo::mem::read<uintptr_t>(image_base + qcamo::mgs3::kPlayerSlot);
+        auto handle = reinterpret_cast<uintptr_t>(target);
+        if (player && handle && handle != player) {
+            latched_actor = handle;
+            latched_prefix = static_cast<uint32_t>(player & 0xFFFF0000u);
+            LOG_INFO("actor latch: %llX (prefix %04X)",
+                     static_cast<unsigned long long>(handle), latched_prefix >> 16);
         }
     }
-    if (!applying && message == qcamo::mgs3::kFrameMessage && caller == qcamo::mgs3::kFrameCaller) {
+    if (!applying && message == qcamo::mgs3::kFrameMessage &&
+        reinterpret_cast<uintptr_t>(__builtin_return_address(0)) - image_base ==
+            qcamo::mgs3::kFrameCaller) {
         applying = true;
         if (int cue = qcamo::pending_sound.exchange(0); cue) {
             game_function<void(__fastcall*)(uint32_t)>(qcamo::mgs3::kPlaySound)(
@@ -333,23 +333,6 @@ DWORD WINAPI init(LPVOID)
     }
     LOG_INFO("ready: hold G or the pad chord to open the menu");
     for (;;) {
-        // Area watcher. Reads memory only: calling game functions from this
-        // thread while the gameplay thread is inside them is not safe.
-        {
-            auto stats = qcamo::mem::read<uintptr_t>(image_base + qcamo::mgs3::kStatsSlot);
-            static char area[qcamo::mgs3::kAreaSize + 1];
-            if (stats && qcamo::mem::range_readable(stats + qcamo::mgs3::kAreaCode,
-                                                    qcamo::mgs3::kAreaSize)) {
-                char now[qcamo::mgs3::kAreaSize + 1]{};
-                for (uint32_t i = 0; i < qcamo::mgs3::kAreaSize; ++i) {
-                    now[i] = qcamo::mem::read<char>(stats + qcamo::mgs3::kAreaCode + i);
-                }
-                if (__builtin_memcmp(now, area, qcamo::mgs3::kAreaSize) != 0) {
-                    LOG_INFO("area %s -> %s", area[0] ? area : "(none)", now);
-                    __builtin_memcpy(area, now, sizeof(now));
-                }
-            }
-        }
         // Watchdog: Present may stall across loads and cutscene cuts, so drop
         // our pause promptly when gameplay goes away under an open menu. The
         // render thread closes its side on the next frame.
