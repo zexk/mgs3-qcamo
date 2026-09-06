@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <cstdint>
 #include <vector>
@@ -332,9 +333,10 @@ void draw_menu(const std::vector<uint8_t>& uniforms)
         }
     };
 
+    float font_height = 20 * std::max(1.0f, std::round(scale));
     float pad = 6 * scale;
-    float header_height = 20 * scale;
-    float hint_height = 13 * scale;
+    float header_height = font_height;
+    float hint_height = font_height;
     float row_height = 34 * scale;
     float width = 330 * scale;
     int count = static_cast<int>(uniforms.size());
@@ -376,7 +378,7 @@ void draw_menu(const std::vector<uint8_t>& uniforms)
                                 IM_COL32(70 + (id * 37) % 100, 66 + (id * 19) % 85,
                                          42 + (id * 29) % 70, 255));
         }
-        float label_height = 17 * scale;
+        float label_height = font_height;
         text({patch_max.x + 10 * scale,
               row_min.y + (row_max.y - row_min.y - label_height) * 0.5f},
              label_height, worn ? worn_ink : kRowText, kUniformNames[id]);

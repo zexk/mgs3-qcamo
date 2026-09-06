@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <filesystem>
 
 #include "common/log.h"
@@ -160,8 +161,9 @@ void hud_text(ImDrawList* draw, ImVec2 position, float height, ImU32 color, cons
             continue;
         }
         float width = glyph.width * height;
-        draw->AddImage(reinterpret_cast<ImTextureID>(atlas), position,
-                       {position.x + width, position.y + height},
+        ImVec2 min{std::round(position.x), std::round(position.y)};
+        ImVec2 max{std::round(position.x + width), std::round(position.y + height)};
+        draw->AddImage(reinterpret_cast<ImTextureID>(atlas), min, max,
                        {glyph.u0, glyph.v0}, {glyph.u1, glyph.v1}, color);
         position.x += width + kGap * height;
     }
