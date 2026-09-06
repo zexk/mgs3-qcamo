@@ -618,11 +618,18 @@ bool install_hooks()
     bool ok = SUCCEEDED(result);
     if (ok) {
         void** vtable = *reinterpret_cast<void***>(swap_chain);
-        ok = MH_CreateHook(vtable[8], reinterpret_cast<void*>(&present_hook),
+        // Shared with BBTracker: serialized installs let MinHook chain both detours.
+        HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Local\\MGSModsDxgiHookInstall");
+        DWORD wait = mutex ? WaitForSingleObject(mutex, INFINITE) : WAIT_FAILED;
+        bool locked = wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED;
+        ok = locked &&
+             MH_CreateHook(vtable[8], reinterpret_cast<void*>(&present_hook),
                            reinterpret_cast<void**>(&original_present)) == MH_OK &&
              MH_CreateHook(vtable[13], reinterpret_cast<void*>(&resize_hook),
                            reinterpret_cast<void**>(&original_resize)) == MH_OK &&
              MH_EnableHook(vtable[8]) == MH_OK && MH_EnableHook(vtable[13]) == MH_OK;
+        if (locked) ReleaseMutex(mutex);
+        if (mutex) CloseHandle(mutex);
     }
     if (swap_chain) swap_chain->Release();
     if (dummy_device) dummy_device->Release();
