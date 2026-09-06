@@ -17,6 +17,8 @@ extern std::atomic_int pending_sound;
 // paint that scores best where Snake stands.
 using QueueUniform = bool (*)(uint8_t uniform, uint8_t face);
 
+// Retry inventory discovery from the worker thread, never the render hook.
+void refresh_inventory();
 bool start_overlay(uintptr_t image_base, QueueUniform queue_uniform);
 
 } // namespace qcamo

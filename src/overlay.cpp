@@ -40,7 +40,7 @@ ID3D11Device* device;
 ID3D11DeviceContext* context;
 ID3D11RenderTargetView* render_target;
 uintptr_t base;
-uintptr_t inventory;
+std::atomic_uintptr_t inventory;
 QueueUniform queue_uniform;
 // The face paint every row is offered with, fixed while the menu is open.
 uint8_t paired_face;
@@ -240,10 +240,11 @@ uint64_t inventory_refresh_at;
 std::vector<uint8_t> owned_items(size_t count, int first_item)
 {
     std::vector<uint8_t> result;
-    if (!inventory) return result;
+    uintptr_t items = inventory.load();
+    if (!items) return result;
     result.reserve(count);
     for (uint8_t id = 0; id < count; ++id) {
-        auto entry = inventory + (first_item + id) * 80;
+        auto entry = items + (first_item + id) * 80;
         if (mem::range_readable(entry, sizeof(int16_t)) && mem::read<int16_t>(entry) >= 1) {
             result.push_back(id);
         }
@@ -257,10 +258,6 @@ void refresh_owned_items()
     if (now < inventory_refresh_at) return;
     // ponytail: one-second polling; hook inventory writes only if pickup latency matters.
     inventory_refresh_at = now + 1000;
-    if (!inventory) {
-        inventory = find_inventory();
-        if (inventory) LOG_INFO("inventory table found");
-    }
 
     auto uniforms = owned_items(kUniformNames.size(), kFirstUniformEntry);
     if (uniforms.empty()) uniforms = {0, 1};
@@ -308,8 +305,12 @@ const std::vector<uint8_t>& menu_uniforms()
         int slot = camo_slot(base);
         if (slot != previous_slot || rows_revision != inventory_revision) {
             rows = owned_uniform_cache;
-            std::stable_sort(rows.begin(), rows.end(), [slot](uint8_t a, uint8_t b) {
-                return camo_value(base, slot, a) > camo_value(base, slot, b);
+            std::array<int, kUniformNames.size()> scores{};
+            for (uint8_t uniform_id : rows) {
+                scores[uniform_id] = camo_value(base, slot, uniform_id);
+            }
+            std::stable_sort(rows.begin(), rows.end(), [&scores](uint8_t a, uint8_t b) {
+                return scores[a] > scores[b];
             });
             paired_face = best_face(slot);
             previous_slot = slot;
@@ -668,12 +669,26 @@ bool install_hooks()
 std::atomic_bool menu_open;
 std::atomic_int pending_sound;
 
+void refresh_inventory()
+{
+    static uint64_t retry_at;
+    uint64_t now = GetTickCount64();
+    if (inventory.load() || now < retry_at) return;
+    retry_at = now + 1000;
+    uintptr_t found = find_inventory();
+    if (found) {
+        inventory = found;
+        LOG_INFO("inventory table found");
+    }
+}
+
 bool start_overlay(uintptr_t image_base, QueueUniform callback)
 {
     base = image_base;
     queue_uniform = callback;
+    refresh_inventory();
     refresh_owned_items();
-    if (!inventory) LOG_INFO("inventory table not found; using POC uniforms");
+    if (!inventory.load()) LOG_INFO("inventory table not found; using POC uniforms");
     return install_hooks();
 }
 

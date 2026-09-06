@@ -333,6 +333,7 @@ DWORD WINAPI init(LPVOID)
     }
     LOG_INFO("ready: hold G or the pad chord to open the menu");
     for (;;) {
+        qcamo::refresh_inventory();
         // Watchdog: Present may stall across loads and cutscene cuts, so drop
         // our pause promptly when gameplay goes away under an open menu. The
         // render thread closes its side on the next frame.
