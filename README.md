@@ -8,11 +8,16 @@ an owned uniform, Enter equips it, and releasing `G` closes the menu without
 changing anything. `F6` remains a test shortcut which toggles Olive Drab and Tiger
 Stripe.
 
-On a pad, triangle plus L1 opens the menu, L1 alone keeps it up, the D-pad or
-left stick moves the selection, cross equips, and releasing L1 closes. Every
+On a pad, triangle plus L1 opens the menu in either order, L1 alone keeps it
+up, the D-pad moves the selection, cross equips, and releasing L1 closes. Every
 pad button is already spoken for by the game, which is why opening needs a
-chord. Pad input goes through XInput, resolved at run time, so a missing
-runtime costs pad support rather than the whole overlay.
+chord.
+
+Pad input comes from Steam Input, because that is the only place it exists: the
+game imports no input API, and XInput, winmm and DirectInput all enumerate
+nothing while Steam holds the device. The menu reads the same digital actions
+the game reads, so it needs no controller configuration of its own. See
+`docs/research.md` for how the actions were identified.
 
 On the keyboard no chord is needed: `G` is free in both of the game's layouts,
 as are the arrow keys and Enter, and Enter is what the game's own keyboard
@@ -22,7 +27,7 @@ Opening quick menu uses same semi-pause as weapon and item wheels. World and
 Snake stop; audio and menu movement continue. `W`/`S` therefore navigate
 without moving Snake.
 
-Enter accepts one change every four seconds. During reload/settle time, Enter
+Enter accepts one change every 2.5 seconds. During reload/settle time, Enter
 does nothing and the menu stays open.
 
 Uniform changes run through game's uniform and face-paint asset pipelines, so
@@ -55,7 +60,15 @@ in `minhook` and a 64-bit MinGW toolchain.
 Phase 2 is complete. The menu draws through a D3D11 overlay in the game's own
 HUD style: camouflage swatches are the Survival Viewer icon tiles, text uses the
 game's HUD font atlas, and panel colours are sampled from the Viewer and the
-equipment HUD. Next work: camouflage-score comparisons, face-paint
-combinations, and final input scheme.
+equipment HUD.
+
+Changes now survive area transitions. The mod used to copy the Survival
+Viewer's `set_alloc_heap(0)` / `set_alloc_heap(1)` bracket around its message
+dispatches, which is only correct inside the Viewer; during gameplay it left
+the allocator pointing at the wrong arena and the next stage load never
+finished. It now restores the value that was there.
+
+Next work: camouflage-score comparisons, face-paint combinations, and freezing
+gameplay while the menu is open.
 
 See [docs/research.md](docs/research.md) for verified game protocol.
