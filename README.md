@@ -30,6 +30,10 @@ On the keyboard no chord is needed: `G` is free in both of the game's layouts,
 as are the arrow keys and Enter, and Enter is what the game's own keyboard
 prompts show for cross.
 
+The menu opens only during playable gameplay. Cutscenes, the Survival Viewer,
+other pause states and non-stage screens all refuse it, using the same player
+state test the game's own wheel popups make before they open.
+
 Opening quick menu uses same semi-pause as weapon and item wheels. World and
 Snake stop; audio and menu movement continue. `W`/`S` therefore navigate
 without moving Snake.

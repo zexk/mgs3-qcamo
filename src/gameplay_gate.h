@@ -9,10 +9,9 @@
 //   screen exists.
 // - GV_PauseLevel: must carry no bits outside our own wheel bit. A set wheel
 //   bit we did not set means a game wheel (or another pauser) owns it.
-//
-// Cutscene caveat: scripted sequences inside an s/v stage keep the same area
-// code, so this gate narrows the window but does not yet prove "Snake is
-// controllable". If a demo-playback flag turns up, it belongs here.
+// - Player state flags: the same test the game's own wheel popups make before
+//   they open. Cutscenes keep the stage's area code, so this is what actually
+//   separates a scripted sequence from playable gameplay.
 
 #pragma once
 
@@ -28,6 +27,7 @@ enum class GateBlock {
     Stats,
     Area,
     Viewer,
+    Cutscene,
     Pause,
 };
 
@@ -38,6 +38,7 @@ inline const char* gate_name(GateBlock block)
     case GateBlock::Stats: return "stats unavailable";
     case GateBlock::Area: return "non-gameplay area";
     case GateBlock::Viewer: return "survival viewer open";
+    case GateBlock::Cutscene: return "cutscene or uncontrollable state";
     case GateBlock::Pause: return "game paused";
     }
     return "unknown";
@@ -64,6 +65,15 @@ inline GateBlock gate_state(uintptr_t base, bool allow_wheel)
     }
     if (mem::read<uintptr_t>(base + mgs3::kViewerSlot) != 0) {
         return GateBlock::Viewer;
+    }
+    if (!mem::range_readable(base + mgs3::kPlayerFlagsA, sizeof(uint32_t)) ||
+        !mem::range_readable(base + mgs3::kPlayerFlagsB, sizeof(uint32_t))) {
+        return GateBlock::Cutscene;
+    }
+    uint32_t flags = mem::read<uint32_t>(base + mgs3::kPlayerFlagsA) |
+                     mem::read<uint32_t>(base + mgs3::kPlayerFlagsB);
+    if ((flags & mgs3::kNoPopupMask) != 0) {
+        return GateBlock::Cutscene;
     }
     if (!mem::range_readable(base + mgs3::kPauseLevel, sizeof(uint32_t))) {
         return GateBlock::Pause;

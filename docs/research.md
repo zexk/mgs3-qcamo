@@ -466,6 +466,38 @@ in between.
 Calls must be made from the gameplay thread. The menu runs on the render thread,
 so it posts a cue and the frame hook plays it.
 
+## Player state flags
+
+`0x1E21AB0` and `0x1E21AB4` are the game's global player-state flags. They are
+read as a pair and tested against a mask at hundreds of call sites, each mask
+naming the states that particular action must not interrupt:
+
+    mov eax, [0x1E21AB4]
+    or  eax, [0x1E21AB0]
+    test eax, <mask>
+    jne  <refuse>
+
+The masks that matter here belong to the wheel-style popups, because they take
+the same `GV_PauseLevel` wheel bit the quick menu takes and so share its
+precondition exactly: `0xFE000200` at `0x6CA3EA` and `0x6E074D`, `0x86000200`
+at `0x6DA4EB`. The mod copies the stricter one.
+
+Measured against a running game, 2141 samples at 10Hz across four areas and
+several cutscenes: the allowed side is a single value, `0x01000080`, in all
+1376 of its samples, and the blocked side has five, `0x01000200`, `0x03000200`,
+`0x05000080`, `0x09000200` and `0x11000200`, in 765. The two sets do not
+overlap.
+
+Bit 9 is the obvious cutscene bit and is set in most blocked states, but
+`0x05000080` has it clear and is caught only by bit 26. Copying the game's mask
+rather than the one bit that looked sufficient is what covers that case.
+
+This is what the area code could not do. Scripted sequences inside an ordinary
+stage keep the stage's own area code -- blocked stretches show up in `v001a`
+and `v003a`, not just in the cutscene-suffixed `v004a_0` -- so before this the
+gate let the menu open during them, and the wheel pause bit it set corrupted
+the sequence.
+
 ## External references
 
 - [Konami MGS3 manual](https://metalgear.konami.net/manual/mc1/mgs3/pc/en/page15.html)

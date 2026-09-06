@@ -110,4 +110,15 @@ inline constexpr uint32_t kFrameCaller = 0x5BC850;
 inline constexpr uint32_t kPauseLevel = 0x1D78F6C;
 inline constexpr uint32_t kWheelPause = 1 << 2;
 
+// Global player-state flags, tested as a pair against a mask all over the
+// game. The wheel-style popups that take the wheel pause bit guard on exactly
+// this before opening: 0x6CA3EA and 0x6E074D with 0xFE000200, 0x6DA4EB with
+// 0x86000200. Bit 9 is the one that separates a cutscene from gameplay --
+// observed live as 0x200 throughout a cutscene and clear during play -- and
+// the top bits cover the other states a popup must not interrupt. The
+// stricter of the two masks is the one to copy.
+inline constexpr uint32_t kPlayerFlagsA = 0x1E21AB0;
+inline constexpr uint32_t kPlayerFlagsB = 0x1E21AB4;
+inline constexpr uint32_t kNoPopupMask = 0xFE000200;
+
 } // namespace qcamo::mgs3
