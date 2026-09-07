@@ -423,14 +423,15 @@ plays the game's operation-not-permitted cue `0x300F` when opening is refused.
 
 ## Pad input
 
-The pad reaches the process only through Steam Input. The executable imports
-`GetAsyncKeyState` and `GetKeyState` from USER32 and no other input API; it and
-`Engine.dll` pull `SteamInput006` through
+With Steam Input enabled, the pad reaches the process only through Steam Input.
+The executable imports `GetAsyncKeyState` and `GetKeyState` from USER32 and no
+other input API; it and `Engine.dll` pull `SteamInput006` through
 `SteamInternal_FindOrCreateUserInterface`. XInput reports
 `ERROR_DEVICE_NOT_CONNECTED` on all four slots, the winmm joystick API
 enumerates nothing, and DirectInput 8 enumerates nothing under
 `DI8DEVCLASS_GAMECTRL`. `DI8DEVCLASS_ALL` finds only "Wine Mouse", which is a
-trap.
+trap. qcamo also polls XInput directly, which supplies controller state when
+Steam Input is disabled or does not manage the device.
 
 The game uses the C++ interface, so hooking the flat `SteamAPI_ISteamInput_*`
 exports catches nothing. Those exports are still useful as documentation: each

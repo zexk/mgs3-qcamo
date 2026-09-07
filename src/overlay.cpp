@@ -1,6 +1,7 @@
 #include "overlay.h"
 
 #include <windows.h>
+#include <xinput.h>
 #include <d3d11.h>
 #include <dxgi.h>
 #include <MinHook.h>
@@ -88,8 +89,8 @@ bool pressed(int key)
     return result;
 }
 
-// The pad reaches this process only through Steam Input: the game imports no
-// input API, and XInput, winmm and DirectInput all enumerate nothing while
+// Steam-managed pads reach this process through Steam Input: the game imports
+// no input API, and XInput, winmm and DirectInput all enumerate nothing while
 // Steam holds the device. The game drives Steam Input through the C++
 // interface, so its action names are the contract here; they were read back
 // with GetStringForDigitalActionName off the handles it polls.
@@ -100,6 +101,22 @@ struct Pad {
     bool up;
     bool down;
 };
+
+constexpr Pad xinput_pad(WORD buttons, SHORT stick_y)
+{
+    return {
+        (buttons & XINPUT_GAMEPAD_LEFT_SHOULDER) != 0,
+        (buttons & XINPUT_GAMEPAD_Y) != 0,
+        (buttons & XINPUT_GAMEPAD_A) != 0,
+        (buttons & XINPUT_GAMEPAD_DPAD_UP) != 0 || stick_y > 16384,
+        (buttons & XINPUT_GAMEPAD_DPAD_DOWN) != 0 || stick_y < -16384,
+    };
+}
+
+static_assert(xinput_pad(XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_Y, 0).shoulder &&
+              xinput_pad(XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_Y, 0).open_button &&
+              xinput_pad(XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_DPAD_DOWN, 0).equip &&
+              xinput_pad(0, 20000).up && xinput_pad(0, -20000).down);
 
 // Flat wrappers preserve Steam's structures: digital data is two packed bytes;
 // analog data is mode, x, y, active with padding to 16 bytes.
@@ -198,22 +215,49 @@ static_assert(stick_step(0.6f, true) == -1 && stick_step(-0.6f, true) == 1 &&
 Pad read_pad()
 {
     Pad pad{};
-    if (!open_pad()) return pad;
-    // The low byte is the pressed state; the high byte says whether the action
-    // is in the action set the game currently has active.
-    auto down = [](uint64_t action) {
-        return action && (steam_pad.data(steam_pad.self, steam_pad.controller, action) & 0xFF) != 0;
-    };
-    pad.shoulder = down(steam_pad.shoulder);
-    pad.open_button = down(steam_pad.triangle);
-    pad.equip = down(steam_pad.cross);
-    int stick = 0;
-    if (steam_pad.move && steam_pad.analog_data) {
-        auto data = steam_pad.analog_data(steam_pad.self, steam_pad.controller, steam_pad.move);
-        stick = stick_step(data.y, data.active);
+    if (open_pad()) {
+        // The low byte is the pressed state; the high byte says whether the action
+        // is in the action set the game currently has active.
+        auto down = [](uint64_t action) {
+            return action &&
+                   (steam_pad.data(steam_pad.self, steam_pad.controller, action) & 0xFF) != 0;
+        };
+        pad.shoulder = down(steam_pad.shoulder);
+        pad.open_button = down(steam_pad.triangle);
+        pad.equip = down(steam_pad.cross);
+        int stick = 0;
+        if (steam_pad.move && steam_pad.analog_data) {
+            auto data = steam_pad.analog_data(steam_pad.self, steam_pad.controller, steam_pad.move);
+            stick = stick_step(data.y, data.active);
+        }
+        pad.up = down(steam_pad.up) || stick < 0;
+        pad.down = down(steam_pad.down) || stick > 0;
     }
-    pad.up = down(steam_pad.up) || stick < 0;
-    pad.down = down(steam_pad.down) || stick > 0;
+
+    // Steam hides XInput devices while managing them. Polling both paths lets
+    // native XInput take over when Steam Input is disabled or declines a pad.
+    using XInputGetStateFn = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
+    static auto get_state = [] {
+        HMODULE module = LoadLibraryExW(L"xinput1_4.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        return module ? reinterpret_cast<XInputGetStateFn>(
+                            GetProcAddress(module, "XInputGetState"))
+                      : nullptr;
+    }();
+    for (DWORD slot = 0; get_state && slot < XUSER_MAX_COUNT; ++slot) {
+        XINPUT_STATE state{};
+        if (get_state(slot, &state) != ERROR_SUCCESS) continue;
+        Pad native = xinput_pad(state.Gamepad.wButtons, state.Gamepad.sThumbLY);
+        pad.shoulder |= native.shoulder;
+        pad.open_button |= native.open_button;
+        pad.equip |= native.equip;
+        pad.up |= native.up;
+        pad.down |= native.down;
+        static bool logged;
+        if (!logged) {
+            logged = true;
+            LOG_INFO("pad ready through XInput slot %lu", static_cast<unsigned long>(slot));
+        }
+    }
     return pad;
 }
 

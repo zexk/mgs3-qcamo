@@ -10,7 +10,7 @@ of Metal Gear Solid 3, styled after the Delta remake's camo menu.
 - Fast equipping without opening the Survival Viewer
 - Wheel-style semi-pause during selection
 - Game-native camouflage art, HUD font, sounds, and asset loading
-- Keyboard and Steam Input controller support
+- Keyboard, Steam Input, and XInput controller support
 
 Hold `G`, use `W`/`S` or `Up`/`Down`, and press Enter to equip. On a pad,
 press triangle plus L1, select with the D-pad, and equip with cross. Releasing
