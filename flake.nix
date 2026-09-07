@@ -13,7 +13,7 @@
     in {
       packages.${system}.default = mingw.stdenv.mkDerivation {
         pname = "qcamo";
-        version = "1.0.3";
+        version = "1.0.4";
         src = self;
         nativeBuildInputs = [ mingw.buildPackages.cmake mingw.buildPackages.ninja ];
         inherit imgui minhook;

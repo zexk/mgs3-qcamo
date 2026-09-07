@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.4
+
+- Added native XInput fallback for controllers unavailable through Steam Input.
+
 ## 1.0.3
 
 - Reworked camouflage swaps around the game's actor scheduler, keeping Snake
