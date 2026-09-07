@@ -135,7 +135,9 @@ change.
 1. Write the uniform to stats `+0x67E`.
 2. Dispatch `0x1A0001`.
 3. `asset_id(0x602F5702, uniform)`.
-4. `request`, `set_mode(queue, 2)`, `set_id(queue, asset)`.
+4. Wait for global `busy()` to clear, then `request`, `set_mode(queue, 2)`,
+   `set_id(queue, asset)`. Both Viewer state machines wait before touching the
+   shared request slot.
 5. `yield(0x106)` while `busy()`.
 6. `finalize(entry, 2)`, then `finish(queue, 0x0D413AA8)`.
 7. Dispatch `0x1A0002` with the handle.
@@ -159,6 +161,10 @@ Run every phase after the actor-job dispatcher at `0x10EE10` returns. Running a
 phase from the player dispatch at `0x5BC84B`, before or after its original call,
 mutates model state while later actor jobs still walk the old nodes, producing
 the null dereference at `0xC8187`.
+
+Keep Snake's actor paused from before the first mutation through the final
+`0x1A0014`. Menu visibility cannot own this pause: the player may release the
+hold immediately after accepting a change, between transaction phases.
 
 Load before dispatching `0x1A0001`. That message begins a change the game
 expects `0x1A0002` to finish with a real handle; failing the load after it has
