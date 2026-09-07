@@ -37,7 +37,7 @@ add_library(qcamo SHARED src/qcamo.cpp src/overlay.cpp src/camo_swatch.cpp
   src/camo_index.cpp src/ctxr.cpp src/hud_font.cpp src/common/log.cpp)
 set_target_properties(qcamo PROPERTIES PREFIX "" SUFFIX ".asi")
 target_include_directories(qcamo PRIVATE src)
-target_link_libraries(qcamo PRIVATE minhook imgui d3d11 dxgi d3dcompiler dwmapi)
+target_link_libraries(qcamo PRIVATE minhook imgui d3d11 dxgi d3dcompiler dwmapi dbghelp)
 
 if(MINGW)
   target_link_options(qcamo PRIVATE -static -static-libgcc -static-libstdc++)

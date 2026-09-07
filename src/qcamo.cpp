@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <dbghelp.h>
 #include <MinHook.h>
 
 #include <atomic>
@@ -15,29 +16,32 @@ namespace {
 
 using Dispatch = intptr_t(__fastcall*)(void*, uint32_t, void*);
 Dispatch original_dispatch;
+using TaskDispatch = void(__fastcall*)();
+TaskDispatch original_task_dispatch;
 uintptr_t image_base;
+uintptr_t image_size;
 bool applying;
-// Frames to wait before the settle refresh, and so how long the input gate
-// holds. This replaces a 2.5s wall-clock wait copied from the gap between a
-// native change's 1A000F and its 1A0014 -- but that gap is the Viewer screen
-// closing at 0x3030F0, not anything a change waits for, and neither native
-// change path has a timer at all. Both of theirs wait on Viewer flags through
-// 0x2FF400, which reads null during gameplay, so there is no game-side
-// predicate to borrow.
-//
-// Nothing of ours is left pending when change_camo returns: both assets are
-// pumped until 0xE1970 clears and all three dispatches have gone out. What is
-// left is the player consuming them on its own tick, which is a frame, not
-// seconds. This is the one number to raise if a fast second swap misbehaves.
-constexpr int kSettleFrames = 1;
-
 std::atomic_int pending_uniform{-1};
 std::atomic_int pending_face{-1};
-// Gameplay thread only: set by change_camo, counted down by the frame hook.
+// Gameplay thread only. Two native ticks separate uniform loading, face
+// loading, and the final refresh; doing both loads in one tick leaves the
+// composite model without a node and crashes at game RVA 0xC8187.
 int settle_frames;
+uint8_t change_face;
 uint64_t change_started;
 std::atomic_bool change_busy;
 bool menu_paused;
+std::atomic_flag dumping = ATOMIC_FLAG_INIT;
+std::filesystem::path crash_dump_path;
+// Crash tracking. A change that reaches the same end state by a different route
+// than the Viewer's can leave state that only faults later -- a following
+// change, an area transition, a cutscene -- so the handler records every fatal
+// exception, not only ones raised while a change is in flight. These say what
+// qcamo last did, so a report can tell our damage from the game's own.
+std::atomic<const char*> change_phase{"idle"};
+std::atomic_int change_uniform{-1};
+std::atomic_int change_face_logged{-1};
+std::atomic_int crashes_logged;
 
 template <typename Function>
 Function game_function(uint32_t rva)
@@ -124,18 +128,19 @@ void* load_asset(uint32_t type, int id)
 
     auto busy = game_function<int(__fastcall*)()>(qcamo::mgs3::kAssetBusy);
     auto pump = game_function<void(__fastcall*)(int)>(qcamo::mgs3::kPumpTasks);
-    // The game's own area loader waits the same way at 0x9BF40, so re-entering
-    // the scheduler from here is the sanctioned pattern rather than a hack.
+    // The game's own area loader waits the same way at 0x9BF40. There is no
+    // safe cancellation path: abandoning a still-busy queue strands the asset
+    // system and crashes later, so wait to completion exactly as native does.
     int pumps = 0;
-    while (pumps < 10000 && busy()) {
+    while (busy()) {
         pump(0x106);
-        ++pumps;
+        // A load that never completes reads as a freeze, not a crash, so say so
+        // once rather than leaving the log silent about where the game stopped.
+        if (++pumps == 20000) {
+            LOG_WARN("asset %08X: still busy after %d pumps", id, pumps);
+        }
     }
-    bool still_busy = busy();
-    LOG_INFO("asset %08X: %d pumps%s", id, pumps, still_busy ? " (still busy)" : "");
-    if (still_busy) {
-        return nullptr;
-    }
+    LOG_INFO("asset %08X: %d pumps", id, pumps);
     game_function<void(__fastcall*)(void*, int)>(qcamo::mgs3::kFinalizeAsset)(
         reinterpret_cast<void*>(request), 2);
     return queue;
@@ -168,8 +173,10 @@ void change_camo(uint8_t next, uint8_t next_face)
         change_busy = false;
         return;
     }
-    settle_frames = kSettleFrames;
     change_started = GetTickCount64();
+    change_phase = "uniform";
+    change_uniform = next;
+    change_face_logged = next_face;
     int id = game_function<int(__fastcall*)(uint32_t, int)>(
         qcamo::mgs3::kUniformAssetId)(qcamo::mgs3::kUniformAssetType, next);
     LOG_INFO("uniform %u -> %u, face %u -> %u; loading asset %08X", current, next,
@@ -186,22 +193,37 @@ void change_camo(uint8_t next, uint8_t next_face)
     if (!asset) {
         settle_frames = 0;
         change_busy = false;
+        change_phase = "idle";
         LOG_ERROR("change stopped: asset unavailable; nothing dispatched");
         return;
     }
     qcamo::mem::write<uint8_t>(address, next);
+    game_function<void(__fastcall*)()>(qcamo::mgs3::kRefreshEquipment)();
     send_player(qcamo::mgs3::kBeginCamoChange);
     send_player(qcamo::mgs3::kLoadCamo, asset);
 
     qcamo::mem::write<uint8_t>(stats + qcamo::mgs3::kEquippedFace, 0);
     send_player(qcamo::mgs3::kBeginFaceChange);
+    change_face = next_face;
+    settle_frames = 2;
+    LOG_INFO("uniform phase applied; face %u pending", next_face);
+}
+
+bool finish_face_change()
+{
+    change_phase = "face";
+    auto stats = qcamo::mem::read<uintptr_t>(image_base + qcamo::mgs3::kStatsSlot);
+    if (!stats || !qcamo::mem::range_readable(stats, 0x680)) {
+        LOG_ERROR("change stopped: gameplay state unavailable before face phase");
+        return false;
+    }
     int face_id = game_function<int(__fastcall*)(uint32_t, int)>(
-        qcamo::mgs3::kUniformAssetId)(qcamo::mgs3::kFaceAssetType, next_face);
+        qcamo::mgs3::kUniformAssetId)(qcamo::mgs3::kFaceAssetType, change_face);
     if (!load_asset(qcamo::mgs3::kFaceAssetType, face_id)) {
         LOG_ERROR("change stopped: face asset unavailable");
-        return;
+        return false;
     }
-    qcamo::mem::write<uint8_t>(stats + qcamo::mgs3::kEquippedFace, next_face);
+    qcamo::mem::write<uint8_t>(stats + qcamo::mgs3::kEquippedFace, change_face);
     game_function<void(__fastcall*)()>(qcamo::mgs3::kRefreshEquipment)();
     auto face_asset = game_function<void*(__fastcall*)(uint32_t)>(
         qcamo::mgs3::kFindAsset)(qcamo::mgs3::kFaceAsset);
@@ -212,8 +234,8 @@ void change_camo(uint8_t next, uint8_t next_face)
             qcamo::mgs3::kApplyFace)(qcamo::mgs3::kFaceAssetSlot,
                                      qcamo::mgs3::kFaceAssetId, prepared);
     }
-    LOG_INFO("uniform %u -> %u, face %u -> %u applied; settling", current, next,
-             current_face, next_face);
+    LOG_INFO("face %u applied; settling", change_face);
+    return true;
 }
 
 intptr_t __fastcall dispatch_hook(void* target, uint32_t message, void* data)
@@ -231,32 +253,47 @@ intptr_t __fastcall dispatch_hook(void* target, uint32_t message, void* data)
                      static_cast<unsigned long long>(handle), latched_prefix >> 16);
         }
     }
-    if (!applying && message == qcamo::mgs3::kFrameMessage &&
-        reinterpret_cast<uintptr_t>(__builtin_return_address(0)) - image_base ==
-            qcamo::mgs3::kFrameCaller) {
-        applying = true;
-        if (int cue = qcamo::pending_sound.exchange(0); cue) {
-            game_function<void(__fastcall*)(uint32_t)>(qcamo::mgs3::kPlaySound)(
-                static_cast<uint32_t>(cue));
-        }
-        if (settle_frames > 0 && --settle_frames == 0) {
-            send_refresh();
-            pending_uniform = -1;
-            change_busy = false;
-            LOG_INFO("change complete in %llums; input ready",
-                     static_cast<unsigned long long>(GetTickCount64() - change_started));
-        } else if (settle_frames > 0 && pending_uniform.exchange(-1) >= 0) {
-            LOG_INFO("uniform change ignored: still settling");
-        } else if (settle_frames == 0) {
-            int requested = pending_uniform.exchange(-1);
-            if (requested >= 0) {
-                change_camo(static_cast<uint8_t>(requested),
-                            static_cast<uint8_t>(pending_face.exchange(-1)));
-            }
-        }
-        applying = false;
-    }
     return result;
+}
+
+void __fastcall task_dispatch_hook()
+{
+    original_task_dispatch();
+    if (applying) return;
+
+    // Whole native actor queue has finished. Running from a player dispatch
+    // callback changes composite-model nodes while later actors still use the
+    // old list and crashes at game RVA 0xC8187.
+    applying = true;
+    if (int cue = qcamo::pending_sound.exchange(0); cue) {
+        game_function<void(__fastcall*)(uint32_t)>(qcamo::mgs3::kPlaySound)(
+            static_cast<uint32_t>(cue));
+    }
+    if (settle_frames == 2) {
+        if (finish_face_change()) {
+            settle_frames = 1;
+        } else {
+            settle_frames = 0;
+            change_busy = false;
+            change_phase = "idle";
+        }
+    } else if (settle_frames == 1) {
+        settle_frames = 0;
+        change_phase = "refresh";
+        send_refresh();
+        pending_uniform = -1;
+        change_busy = false;
+        change_phase = "idle";
+        LOG_INFO("change complete in %llums; input ready",
+                 static_cast<unsigned long long>(GetTickCount64() - change_started));
+    } else {
+        int requested = pending_uniform.exchange(-1);
+        if (requested >= 0) {
+            change_camo(static_cast<uint8_t>(requested),
+                        static_cast<uint8_t>(pending_face.exchange(-1)));
+        }
+    }
+    applying = false;
 }
 
 void set_menu_pause(bool pause_menu)
@@ -305,6 +342,106 @@ std::filesystem::path own_dir()
     return std::filesystem::path(path).parent_path();
 }
 
+// Return addresses left on the stack. Without symbols a minidump is awkward to
+// read on the machine this is built on, and the fault RVA alone rarely names
+// the caller that passed the bad pointer; the RVAs below are what a disassembly
+// of the running image can be walked against directly.
+void log_stack_rvas(const CONTEXT* context)
+{
+    if (!context) {
+        return;
+    }
+    auto stack = static_cast<uintptr_t>(context->Rsp);
+    size_t span = 0x800;
+    while (span >= sizeof(uintptr_t) && !qcamo::mem::range_readable(stack, span)) {
+        span /= 2;
+    }
+    int found = 0;
+    for (size_t offset = 0; offset + sizeof(uintptr_t) <= span && found < 16;
+         offset += sizeof(uintptr_t)) {
+        auto value = qcamo::mem::read<uintptr_t>(stack + offset);
+        if (value - image_base >= image_size) {
+            continue;
+        }
+        LOG_ERROR("  stack +%03zX rva %llX", offset,
+                  static_cast<unsigned long long>(value - image_base));
+        ++found;
+    }
+}
+
+LONG WINAPI record_change_exception(EXCEPTION_POINTERS* pointers)
+{
+    if (!pointers || !pointers->ExceptionRecord) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    auto* record = pointers->ExceptionRecord;
+    switch (record->ExceptionCode) {
+    case EXCEPTION_ACCESS_VIOLATION:
+    case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+    case EXCEPTION_ILLEGAL_INSTRUCTION:
+    case EXCEPTION_IN_PAGE_ERROR:
+    case EXCEPTION_INT_DIVIDE_BY_ZERO:
+    case EXCEPTION_PRIV_INSTRUCTION:
+    case EXCEPTION_STACK_OVERFLOW:
+    case 0xC0000374L: // heap corruption
+    case 0xC0000409L: // stack buffer overrun / fail-fast
+        break;
+    default:
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    // Only the first few, in case the game faults in a loop rather than dying.
+    if (crashes_logged.fetch_add(1) >= 4) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    auto address = reinterpret_cast<uintptr_t>(record->ExceptionAddress);
+    MEMORY_BASIC_INFORMATION memory{};
+    VirtualQuery(record->ExceptionAddress, &memory, sizeof(memory));
+    auto module = reinterpret_cast<uintptr_t>(memory.AllocationBase);
+    // First-chance: the game may still handle this itself, so an entry here is
+    // not proof of a crash. A run that keeps going after one is the tell.
+    LOG_ERROR("exception code=%08lX address=%llX module=%llX offset=%llX thread=%lu",
+              record->ExceptionCode, static_cast<unsigned long long>(address),
+              static_cast<unsigned long long>(module),
+              static_cast<unsigned long long>(address - module), GetCurrentThreadId());
+    LOG_ERROR("  qcamo phase=%s uniform=%d face=%d busy=%d %llums since last change",
+              change_phase.load(), change_uniform.load(), change_face_logged.load(),
+              static_cast<int>(change_busy.load()),
+              static_cast<unsigned long long>(change_started ? GetTickCount64() - change_started
+                                                             : 0));
+    if (record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
+        record->NumberParameters >= 2) {
+        LOG_ERROR("  %s address %llX",
+                  record->ExceptionInformation[0] == 1 ? "write" : "read",
+                  static_cast<unsigned long long>(record->ExceptionInformation[1]));
+    }
+    if (auto* context = pointers->ContextRecord) {
+        LOG_ERROR("  rcx=%llX rdx=%llX r8=%llX r9=%llX rax=%llX rsp=%llX",
+                  static_cast<unsigned long long>(context->Rcx),
+                  static_cast<unsigned long long>(context->Rdx),
+                  static_cast<unsigned long long>(context->R8),
+                  static_cast<unsigned long long>(context->R9),
+                  static_cast<unsigned long long>(context->Rax),
+                  static_cast<unsigned long long>(context->Rsp));
+        log_stack_rvas(context);
+    }
+    if (dumping.test_and_set()) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    HANDLE file = CreateFileW(crash_dump_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                              nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    BOOL written = FALSE;
+    if (file != INVALID_HANDLE_VALUE) {
+        MINIDUMP_EXCEPTION_INFORMATION info{GetCurrentThreadId(), pointers, FALSE};
+        written = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file,
+                                    MiniDumpNormal, &info, nullptr, nullptr);
+        CloseHandle(file);
+    }
+    LOG_ERROR("crash dump %s: qcamo-crash.dmp", written ? "written" : "failed");
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 DWORD WINAPI init(LPVOID)
 {
     auto game = GetModuleHandleW(L"METAL GEAR SOLID3.exe");
@@ -312,6 +449,7 @@ DWORD WINAPI init(LPVOID)
         return 0;
     }
     image_base = reinterpret_cast<uintptr_t>(game);
+    crash_dump_path = own_dir() / L"qcamo-crash.dmp";
     auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(game);
     auto nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(image_base + dos->e_lfanew);
     if (dos->e_magic != IMAGE_DOS_SIGNATURE || nt->Signature != IMAGE_NT_SIGNATURE ||
@@ -319,13 +457,20 @@ DWORD WINAPI init(LPVOID)
         LOG_ERROR("unsupported executable");
         return 0;
     }
+    image_size = nt->OptionalHeader.SizeOfImage;
+    if (!AddVectoredExceptionHandler(0, record_change_exception)) {
+        LOG_WARN("crash handler unavailable");
+    }
 
-    void* target = reinterpret_cast<void*>(image_base + qcamo::mgs3::kMessageDispatch);
+    void* message_target = reinterpret_cast<void*>(image_base + qcamo::mgs3::kMessageDispatch);
+    void* task_target = reinterpret_cast<void*>(image_base + qcamo::mgs3::kTaskDispatch);
     if (MH_Initialize() != MH_OK ||
-        MH_CreateHook(target, reinterpret_cast<void*>(&dispatch_hook),
+        MH_CreateHook(message_target, reinterpret_cast<void*>(&dispatch_hook),
                       reinterpret_cast<void**>(&original_dispatch)) != MH_OK ||
-        MH_EnableHook(target) != MH_OK) {
-        LOG_ERROR("message hook failed");
+        MH_CreateHook(task_target, reinterpret_cast<void*>(&task_dispatch_hook),
+                      reinterpret_cast<void**>(&original_task_dispatch)) != MH_OK ||
+        MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
+        LOG_ERROR("game hooks failed");
         return 0;
     }
     if (!qcamo::start_overlay(image_base, queue_uniform)) {

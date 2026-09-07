@@ -140,16 +140,24 @@ change.
 6. `finalize(entry, 2)`, then `finish(queue, 0x0D413AA8)`.
 7. Dispatch `0x1A0002` with the handle.
 8. Clear stats `+0x67F`, dispatch `0x1A000F`.
-9. Load the face asset through the same queue, pump and finalize path.
+9. Before the next player tick, load the face asset through the same queue, pump
+   and finalize path. Reusing the change path in the uniform tick can leave
+   the composite model without a node; the game then dereferences null at
+   `0xC8187`.
 10. Restore stats `+0x67F`, `refresh_equipment()`, then `find_asset`,
     `prepare_face`, `apply_face`.
-11. Next frame, dispatch `0x1A0014`.
+11. Before the following player tick, dispatch `0x1A0014`.
+
+Run every phase after the actor-job dispatcher at `0x10EE10` returns. Running a
+phase from the player dispatch at `0x5BC84B`, before or after its original call,
+mutates model state while later actor jobs still walk the old nodes, producing
+the null dereference at `0xC8187`.
 
 Load before dispatching `0x1A0001`. That message begins a change the game
 expects `0x1A0002` to finish with a real handle; failing the load after it has
 gone out leaves the player mid-change and wedges the next attempt.
 
-No settle delay is needed. Neither native path has a timer: `0x3008C0` returns
+No wall-clock delay is needed. Neither native path has a timer: `0x3008C0` returns
 to state 0 as soon as its last state finishes, and the path at `0x323xxx` waits
 only on `0x2FF400`, which reads the Viewer context and so answers no during
 gameplay. Once the sequence above returns, both assets are pumped to completion

@@ -8,6 +8,10 @@ namespace qcamo::mgs3 {
 inline constexpr uint32_t kExpectedTimestamp = 0x6980B92F;
 inline constexpr uint32_t kStatsSlot = 0xACDE98;
 inline constexpr uint32_t kMessageDispatch = 0x10EDC0;
+// Runs queued actor jobs, then returns to the main loop. Camouflage changes
+// must run after it: changing a model from inside one actor callback leaves
+// later jobs walking the old composite nodes.
+inline constexpr uint32_t kTaskDispatch = 0x10EE10;
 inline constexpr uint32_t kPlayerSlot = 0x1E16CD0;
 
 inline constexpr uint32_t kEquippedUniform = 0x67E;
@@ -105,10 +109,6 @@ inline constexpr uint32_t kSoundDenied = 0x300F;
 inline constexpr uint32_t kSoundCursor = 0x1A00B;
 inline constexpr uint32_t kSoundDecide = 0x1A00C;
 inline constexpr uint32_t kSoundCancel = 0x1A00D;
-
-// Per-frame dispatch observed on gameplay thread.
-inline constexpr uint32_t kFrameMessage = 0x00000002;
-inline constexpr uint32_t kFrameCaller = 0x5BC850;
 
 // GV_PauseLevel. Weapon and item wheels set bit 2; GV_ExecActor skips actors
 // whose pause mask intersects it, while wheel UI and audio keep updating.
