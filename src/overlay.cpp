@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cfloat>
 #include <cstring>
@@ -100,16 +101,26 @@ struct Pad {
     bool down;
 };
 
-// GetDigitalActionData returns two bytes, state then active, packed into the
-// flat wrapper's return value.
+// Flat wrappers preserve Steam's structures: digital data is two packed bytes;
+// analog data is mode, x, y, active with padding to 16 bytes.
 using DigitalDataFn = uint16_t (*)(void*, uint64_t, uint64_t);
+struct AnalogData {
+    int mode;
+    float x;
+    float y;
+    bool active;
+};
+static_assert(sizeof(AnalogData) == 16 && offsetof(AnalogData, active) == 12);
+using AnalogDataFn = AnalogData (*)(void*, uint64_t, uint64_t);
 using ConnectedFn = int (*)(void*, uint64_t*);
 
 struct SteamPad {
     void* self;
     DigitalDataFn data;
+    AnalogDataFn analog_data;
     uint64_t controller;
     uint64_t triangle, cross, shoulder, up, down;
+    uint64_t move;
 };
 
 SteamPad steam_pad;
@@ -132,6 +143,10 @@ bool open_pad()
         GetProcAddress(steam, "SteamAPI_ISteamInput_GetStringForDigitalActionName"));
     steam_pad.data = reinterpret_cast<DigitalDataFn>(
         GetProcAddress(steam, "SteamAPI_ISteamInput_GetDigitalActionData"));
+    steam_pad.analog_data = reinterpret_cast<AnalogDataFn>(
+        GetProcAddress(steam, "SteamAPI_ISteamInput_GetAnalogActionData"));
+    auto analog_handle = reinterpret_cast<uint64_t (*)(void*, const char*)>(
+        GetProcAddress(steam, "SteamAPI_ISteamInput_GetAnalogActionHandle"));
     steam_pad.self = accessor ? accessor() : nullptr;
     if (!steam_pad.self || !connected || !name_of || !steam_pad.data) return false;
 
@@ -157,14 +172,28 @@ bool open_pad()
             if (std::strcmp(name, entry.name) == 0) *entry.target = action;
         }
     }
+    if (analog_handle && steam_pad.analog_data) {
+        steam_pad.move = analog_handle(steam_pad.self, "ingame_stick_move");
+    }
     if (!steam_pad.shoulder || !steam_pad.triangle || !steam_pad.cross) {
         LOG_WARN("steam input actions not found");
         return false;
     }
     steam_pad.controller = controller;
-    LOG_INFO("pad ready through steam input");
+    LOG_INFO("pad ready through steam input; left stick handle %llu",
+             static_cast<unsigned long long>(steam_pad.move));
     return true;
 }
+
+constexpr float kStickThreshold = 0.5f;
+
+constexpr int stick_step(float y, bool active)
+{
+    return !active ? 0 : y > kStickThreshold ? -1 : y < -kStickThreshold ? 1 : 0;
+}
+
+static_assert(stick_step(0.6f, true) == -1 && stick_step(-0.6f, true) == 1 &&
+              stick_step(0.4f, true) == 0 && stick_step(1.0f, false) == 0);
 
 Pad read_pad()
 {
@@ -178,8 +207,13 @@ Pad read_pad()
     pad.shoulder = down(steam_pad.shoulder);
     pad.open_button = down(steam_pad.triangle);
     pad.equip = down(steam_pad.cross);
-    pad.up = down(steam_pad.up);
-    pad.down = down(steam_pad.down);
+    int stick = 0;
+    if (steam_pad.move && steam_pad.analog_data) {
+        auto data = steam_pad.analog_data(steam_pad.self, steam_pad.controller, steam_pad.move);
+        stick = stick_step(data.y, data.active);
+    }
+    pad.up = down(steam_pad.up) || stick < 0;
+    pad.down = down(steam_pad.down) || stick > 0;
     return pad;
 }
 

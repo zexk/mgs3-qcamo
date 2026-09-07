@@ -469,6 +469,19 @@ identifier from the game's action manifest, which is neither on disk nor in the
 binary's strings. Walk handles 1 to 64 and match on the reported name instead.
 Sticks are analog actions whose names are not among the digital sixteen.
 
+The game resolves four analog manifest identifiers into handles 1 through 4:
+
+| Handle | Identifier | Control |
+| --- | --- | --- |
+| 1 | `ingame_stick_move` | Left stick |
+| 2 | `ingame_stick_cam_dir` | Right stick |
+| 3 | `ingame_cmn_corner_view_l` | Left corner-view trigger |
+| 4 | `ingame_cmn_corner_view_r` | Right corner-view trigger |
+
+`GetAnalogActionData` uses vtable offset `0xA8`. Its 16-byte result is an int
+mode, float x, float y, and active byte at offset 12. Traditional stick axes
+are normalized around `-1.0` to `1.0`; positive y is up.
+
 ## PC control map
 
 The keyboard prompt art is ground truth for pad mapping:
