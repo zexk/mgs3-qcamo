@@ -15,7 +15,7 @@
 namespace {
 
 using Dispatch = intptr_t(__fastcall*)(void*, uint32_t, void*);
-Dispatch original_dispatch;
+Dispatch dispatch;
 using TaskDispatch = void(__fastcall*)();
 TaskDispatch original_task_dispatch;
 uintptr_t image_base;
@@ -77,38 +77,11 @@ void send_player(uint32_t message, void* data = nullptr)
     if (!player) {
         return;
     }
-    // Our sends go straight to original_dispatch, so the dispatch hook never
-    // sees them; log them here to keep the sequence visible in the log.
     LOG_INFO("send msg=%08X target=%llX data=%llX", message,
              static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(player)),
              static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(data)));
     AllocHeap heap(0);
-    original_dispatch(player, message, data);
-}
-
-// Second 1A0014 target (Snake actor beside the player controller), latched
-// whenever native code refreshes it. Handles carry a per-session prefix, so
-// the latch is only used while the prefix still matches the live player.
-uintptr_t latched_actor;
-uint32_t latched_prefix;
-
-void send_refresh()
-{
-    send_player(qcamo::mgs3::kRefreshCamo);
-    auto player = qcamo::mem::read<uintptr_t>(image_base + qcamo::mgs3::kPlayerSlot);
-    if (latched_actor && player && (player & 0xFFFF0000u) == latched_prefix) {
-        LOG_INFO("send msg=%08X target=%llX data=0 (actor)", qcamo::mgs3::kRefreshCamo,
-                 static_cast<unsigned long long>(latched_actor));
-        {
-            AllocHeap heap(0);
-            original_dispatch(reinterpret_cast<void*>(latched_actor),
-                              qcamo::mgs3::kRefreshCamo, nullptr);
-        }
-        LOG_INFO("refresh sent to player and actor %llX",
-                 static_cast<unsigned long long>(latched_actor));
-    } else {
-        LOG_INFO("refresh sent to player only (actor %s)", latched_actor ? "stale" : "unknown");
-    }
+    dispatch(player, message, data);
 }
 
 void* load_asset(uint32_t type, int id)
@@ -243,24 +216,6 @@ bool finish_face_change()
     return true;
 }
 
-intptr_t __fastcall dispatch_hook(void* target, uint32_t message, void* data)
-{
-    auto result = original_dispatch(target, message, data);
-    // Latch the Snake-actor refresh target whenever native code sends one
-    // anywhere but the player slot.
-    if (message == qcamo::mgs3::kRefreshCamo) {
-        auto player = qcamo::mem::read<uintptr_t>(image_base + qcamo::mgs3::kPlayerSlot);
-        auto handle = reinterpret_cast<uintptr_t>(target);
-        if (player && handle && handle != player) {
-            latched_actor = handle;
-            latched_prefix = static_cast<uint32_t>(player & 0xFFFF0000u);
-            LOG_INFO("actor latch: %llX (prefix %04X)",
-                     static_cast<unsigned long long>(handle), latched_prefix >> 16);
-        }
-    }
-    return result;
-}
-
 void set_menu_pause(bool pause_menu)
 {
     if (pause_menu == menu_paused.exchange(pause_menu)) {
@@ -300,7 +255,8 @@ void __fastcall task_dispatch_hook()
     } else if (settle_frames == 1) {
         settle_frames = 0;
         change_phase = "refresh";
-        send_refresh();
+        // Player handler relays this message to the Snake actor.
+        send_player(qcamo::mgs3::kRefreshCamo);
         pending_uniform = -1;
         change_busy = false;
         change_phase = "idle";
@@ -469,11 +425,9 @@ DWORD WINAPI init(LPVOID)
         LOG_WARN("crash handler unavailable");
     }
 
-    void* message_target = reinterpret_cast<void*>(image_base + qcamo::mgs3::kMessageDispatch);
+    dispatch = game_function<Dispatch>(qcamo::mgs3::kMessageDispatch);
     void* task_target = reinterpret_cast<void*>(image_base + qcamo::mgs3::kTaskDispatch);
     if (MH_Initialize() != MH_OK ||
-        MH_CreateHook(message_target, reinterpret_cast<void*>(&dispatch_hook),
-                      reinterpret_cast<void**>(&original_dispatch)) != MH_OK ||
         MH_CreateHook(task_target, reinterpret_cast<void*>(&task_dispatch_hook),
                       reinterpret_cast<void**>(&original_task_dispatch)) != MH_OK ||
         MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {

@@ -164,9 +164,9 @@ gameplay. Once the sequence above returns, both assets are pumped to completion
 and every dispatch has gone out; the only remaining dependency is the player
 consuming them on its own tick.
 
-Dispatch `0x1A0014` to the Snake actor as well as the player. Native sends it to
-both; the second target can be latched from any `0x1A0014` the game sends
-somewhere other than the player slot.
+Dispatch `0x1A0014` only to the player. Its handler relays the message to the
+Snake actor at `0x36B79A`/`0x36BACD`; sending it to the actor explicitly applies
+the refresh twice.
 
 ## Allocator heap
 
