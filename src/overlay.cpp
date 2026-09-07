@@ -270,8 +270,8 @@ void refresh_owned_items()
     }
 }
 
-// Face paint scores independently of the uniform, so one face is best for
-// every row and the best pairing needs no search.
+// Face paint scores independently of the uniform. Tuxedo is the sole native
+// exception because it disables face paint.
 uint8_t best_face(int slot)
 {
     uint8_t best = 0;
@@ -286,6 +286,18 @@ uint8_t best_face(int slot)
     return best;
 }
 
+constexpr bool forces_no_face(uint8_t uniform_id)
+{
+    return uniform_id == mgs3::kTuxedoUniform;
+}
+
+uint8_t face_for_uniform(uint8_t uniform_id)
+{
+    return forces_no_face(uniform_id) ? mgs3::kNoFacePaint : paired_face;
+}
+
+static_assert(forces_no_face(mgs3::kTuxedoUniform) && !forces_no_face(0));
+
 // The rows the menu shows, best camouflage first. Rebuilt once when the menu
 // opens and then frozen, so closed gameplay does no ranking work and the row
 // under the cursor cannot move as Snake's footing changes.
@@ -296,14 +308,15 @@ const std::vector<uint8_t>& menu_uniforms()
         refresh_owned_items();
         int slot = camo_slot(base);
         rows = owned_uniform_cache;
+        paired_face = best_face(slot);
         std::array<int, kUniformNames.size()> scores{};
         for (uint8_t uniform_id : rows) {
-            scores[uniform_id] = camo_value(base, slot, uniform_id);
+            scores[uniform_id] = camo_value(base, slot, uniform_id) +
+                                 face_value(base, slot, face_for_uniform(uniform_id));
         }
         std::stable_sort(rows.begin(), rows.end(), [&scores](uint8_t a, uint8_t b) {
             return scores[a] > scores[b];
         });
-        paired_face = best_face(slot);
         rows_dirty = false;
     }
     return rows;
@@ -407,8 +420,9 @@ void poll_menu()
         // Equipping what Snake already wears is refused here rather than in
         // change_camo, so it never takes the change gate and answers with the
         // game's refusal sound instead of a confirmation.
-        bool worn = uniforms[selected] == equipped_uniform() && paired_face == equipped_face();
-        bool accepted = !worn && queue_uniform(uniforms[selected], paired_face);
+        uint8_t face = face_for_uniform(uniforms[selected]);
+        bool worn = uniforms[selected] == equipped_uniform() && face == equipped_face();
+        bool accepted = !worn && queue_uniform(uniforms[selected], face);
         pending_sound = accepted ? mgs3::kSoundDecide : mgs3::kSoundDenied;
     }
 }
@@ -459,10 +473,11 @@ void draw_menu(const std::vector<uint8_t>& uniforms)
     for (int row = 0; row < visible; ++row) {
         int index = first + row;
         uint8_t id = uniforms[index];
+        uint8_t face = face_for_uniform(id);
         bool active = index == selected;
         // The HUD inverts the row Snake is wearing: olive on black rather than
         // black on olive, dim normally and bright under the cursor.
-        bool worn = id == equipped && paired_face == equipped_face_id;
+        bool worn = id == equipped && face == equipped_face_id;
         ImU32 worn_ink = active ? kRowSelected : kRowWornText;
         ImVec2 row_min{inner, top + row * row_height};
         ImVec2 row_max{inner + inner_width, row_min.y + row_height - 3 * scale};
@@ -484,7 +499,7 @@ void draw_menu(const std::vector<uint8_t>& uniforms)
         }
         patch_min.x = patch_max.x + 4 * scale;
         patch_max.x = patch_min.x + patch_width;
-        if (auto* texture = face_swatch(device, paired_face)) {
+        if (auto* texture = face_swatch(device, face)) {
             draw->AddImage(reinterpret_cast<ImTextureID>(texture), patch_min, patch_max);
         } else {
             draw->AddRect(patch_min, patch_max, kHint, 0.0f, 0, scale);
@@ -496,12 +511,12 @@ void draw_menu(const std::vector<uint8_t>& uniforms)
         // scores best here, since face paint scores the same whatever the
         // uniform.
         char pair[64];
-        std::snprintf(pair, sizeof(pair), "%s / %s", kUniformNames[id], kFaceNames[paired_face]);
+        std::snprintf(pair, sizeof(pair), "%s / %s", kUniformNames[id], kFaceNames[face]);
         text({patch_max.x + 10 * scale, label_y}, label_height, ink, pair);
         if (slot < 0) continue;
         // What swapping to the set would gain or lose. The absolute percentage
         // is already on the HUD, so only the difference is worth the row.
-        int delta = camo_value(base, slot, id) + face_value(base, slot, paired_face) -
+        int delta = camo_value(base, slot, id) + face_value(base, slot, face) -
                     camo_value(base, slot, equipped) - face_value(base, slot, equipped_face_id);
         if (delta == 0) continue;
         char change[8];

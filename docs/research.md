@@ -148,6 +148,13 @@ change.
     `prepare_face`, `apply_face`.
 11. Before the following player tick, dispatch `0x1A0014`.
 
+Two native exceptions matter. Tuxedo is the only uniform whose item word has
+bit 11 set; its uniform state forces face paint 0, dispatches `0x1A000F`, and
+does not run the face loader. Face paint 10 is Mask, a model node rather than a
+normal face texture; its face state loads the asset and updates stats but skips
+`find_asset`, `prepare_face`, and `apply_face`. The final `0x1A0014` handler
+toggles the Mask node.
+
 Run every phase after the actor-job dispatcher at `0x10EE10` returns. Running a
 phase from the player dispatch at `0x5BC84B`, before or after its original call,
 mutates model state while later actor jobs still walk the old nodes, producing

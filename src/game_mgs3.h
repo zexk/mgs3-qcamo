@@ -53,6 +53,9 @@ inline constexpr uint32_t kFaceAssetType = 0x609B53C5;
 inline constexpr uint32_t kFaceAsset = 0x6903A157;
 inline constexpr uint32_t kFaceAssetSlot = 0x00413AA8;
 inline constexpr uint32_t kFaceAssetId = 0x0003A157;
+inline constexpr uint8_t kTuxedoUniform = 16;
+inline constexpr uint8_t kNoFacePaint = 0;
+inline constexpr uint8_t kMaskFacePaint = 10;
 
 // Stats-block area code (bbtracker: 7-char stage string, s*/v* are gameplay).
 inline constexpr uint32_t kAreaCode = 0x24;

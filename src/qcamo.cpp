@@ -146,6 +146,11 @@ void change_camo(uint8_t next, uint8_t next_face)
     auto address = stats + qcamo::mgs3::kEquippedUniform;
     uint8_t current = qcamo::mem::read<uint8_t>(address);
     uint8_t current_face = qcamo::mem::read<uint8_t>(stats + qcamo::mgs3::kEquippedFace);
+    // Native uniform item flag bit 11 means face paint is unavailable. Tuxedo
+    // is the only uniform carrying it in this build.
+    if (next == qcamo::mgs3::kTuxedoUniform) {
+        next_face = qcamo::mgs3::kNoFacePaint;
+    }
     if (current == next && current_face == next_face) {
         LOG_INFO("uniform %u and face %u already equipped", current, current_face);
         change_busy = false;
@@ -155,6 +160,19 @@ void change_camo(uint8_t next, uint8_t next_face)
     change_phase = "uniform";
     change_uniform = next;
     change_face_logged = next_face;
+    change_face = next_face;
+    if (current == next) {
+        // Native writes the replacement before BeginFace only when removing
+        // Mask; the handler uses the current face id to select its model path.
+        if (current_face == qcamo::mgs3::kMaskFacePaint) {
+            qcamo::mem::write<uint8_t>(stats + qcamo::mgs3::kEquippedFace, next_face);
+        }
+        change_phase = "face-begin";
+        send_player(qcamo::mgs3::kBeginFaceChange);
+        settle_frames = 2;
+        LOG_INFO("face-only change %u -> %u pending", current_face, next_face);
+        return;
+    }
     int id = game_function<int(__fastcall*)(uint32_t, int)>(
         qcamo::mgs3::kUniformAssetId)(qcamo::mgs3::kUniformAssetType, next);
     LOG_INFO("uniform %u -> %u, face %u -> %u; loading asset %08X", current, next,
@@ -180,10 +198,12 @@ void change_camo(uint8_t next, uint8_t next_face)
     send_player(qcamo::mgs3::kBeginCamoChange);
     send_player(qcamo::mgs3::kLoadCamo, asset);
 
-    qcamo::mem::write<uint8_t>(stats + qcamo::mgs3::kEquippedFace, 0);
+    qcamo::mem::write<uint8_t>(stats + qcamo::mgs3::kEquippedFace,
+                               qcamo::mgs3::kNoFacePaint);
     send_player(qcamo::mgs3::kBeginFaceChange);
-    change_face = next_face;
-    settle_frames = 2;
+    // Native Tuxedo path ends after removing face paint. Other uniforms need
+    // the face queue rebuilt before their final refresh.
+    settle_frames = next == qcamo::mgs3::kTuxedoUniform ? 1 : 2;
     LOG_INFO("uniform phase applied; face %u pending", next_face);
 }
 
@@ -203,14 +223,18 @@ bool finish_face_change()
     }
     qcamo::mem::write<uint8_t>(stats + qcamo::mgs3::kEquippedFace, change_face);
     game_function<void(__fastcall*)()>(qcamo::mgs3::kRefreshEquipment)();
-    auto face_asset = game_function<void*(__fastcall*)(uint32_t)>(
-        qcamo::mgs3::kFindAsset)(qcamo::mgs3::kFaceAsset);
-    if (face_asset) {
-        auto prepared = game_function<void*(__fastcall*)(void*)>(
-            qcamo::mgs3::kPrepareFace)(face_asset);
-        game_function<void(__fastcall*)(uint32_t, uint32_t, void*)>(
-            qcamo::mgs3::kApplyFace)(qcamo::mgs3::kFaceAssetSlot,
-                                     qcamo::mgs3::kFaceAssetId, prepared);
+    // Mask is a model node toggled by the final 1A0014 handler, not a face
+    // texture. Native skips this whole apply path for face id 10.
+    if (change_face != qcamo::mgs3::kMaskFacePaint) {
+        auto face_asset = game_function<void*(__fastcall*)(uint32_t)>(
+            qcamo::mgs3::kFindAsset)(qcamo::mgs3::kFaceAsset);
+        if (face_asset) {
+            auto prepared = game_function<void*(__fastcall*)(void*)>(
+                qcamo::mgs3::kPrepareFace)(face_asset);
+            game_function<void(__fastcall*)(uint32_t, uint32_t, void*)>(
+                qcamo::mgs3::kApplyFace)(qcamo::mgs3::kFaceAssetSlot,
+                                         qcamo::mgs3::kFaceAssetId, prepared);
+        }
     }
     LOG_INFO("face %u applied; settling", change_face);
     return true;
