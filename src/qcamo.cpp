@@ -30,7 +30,7 @@ int settle_frames;
 uint8_t change_face;
 uint64_t change_started;
 std::atomic_bool change_busy;
-bool menu_paused;
+std::atomic_bool menu_paused;
 std::atomic_flag dumping = ATOMIC_FLAG_INIT;
 std::filesystem::path crash_dump_path;
 // Crash tracking. A change that reaches the same end state by a different route
@@ -113,6 +113,21 @@ void send_refresh()
 
 void* load_asset(uint32_t type, int id)
 {
+    auto busy = game_function<int(__fastcall*)()>(qcamo::mgs3::kAssetBusy);
+    auto pump = game_function<void(__fastcall*)(int)>(qcamo::mgs3::kPumpTasks);
+    int pumps = 0;
+    auto wait = [&] {
+        while (busy()) {
+            pump(0x106);
+            if (++pumps == 20000) {
+                LOG_WARN("asset %08X: still busy after %d pumps", id, pumps);
+            }
+        }
+    };
+
+    // Both Viewer state machines wait for the shared asset system before
+    // touching a request slot. Otherwise a gameplay load can be overwritten.
+    wait();
     auto pool = game_function<void*(__fastcall*)(uint32_t)>(qcamo::mgs3::kAssetRequest)(type);
     if (!pool) {
         return nullptr;
@@ -126,20 +141,10 @@ void* load_asset(uint32_t type, int id)
     qcamo::mem::write<int>(request, id);
     game_function<void(__fastcall*)(void*, int)>(qcamo::mgs3::kAssetRequestId)(queue, id);
 
-    auto busy = game_function<int(__fastcall*)()>(qcamo::mgs3::kAssetBusy);
-    auto pump = game_function<void(__fastcall*)(int)>(qcamo::mgs3::kPumpTasks);
     // The game's own area loader waits the same way at 0x9BF40. There is no
     // safe cancellation path: abandoning a still-busy queue strands the asset
     // system and crashes later, so wait to completion exactly as native does.
-    int pumps = 0;
-    while (busy()) {
-        pump(0x106);
-        // A load that never completes reads as a freeze, not a crash, so say so
-        // once rather than leaving the log silent about where the game stopped.
-        if (++pumps == 20000) {
-            LOG_WARN("asset %08X: still busy after %d pumps", id, pumps);
-        }
-    }
+    wait();
     LOG_INFO("asset %08X: %d pumps", id, pumps);
     game_function<void(__fastcall*)(void*, int)>(qcamo::mgs3::kFinalizeAsset)(
         reinterpret_cast<void*>(request), 2);
@@ -256,6 +261,21 @@ intptr_t __fastcall dispatch_hook(void* target, uint32_t message, void* data)
     return result;
 }
 
+void set_menu_pause(bool pause_menu)
+{
+    if (pause_menu == menu_paused.exchange(pause_menu)) {
+        return;
+    }
+    auto& pause = *reinterpret_cast<uint32_t*>(image_base + qcamo::mgs3::kPauseLevel);
+    std::atomic_ref pause_level(pause);
+    if (pause_menu) {
+        pause_level.fetch_or(qcamo::mgs3::kWheelPause);
+    } else {
+        pause_level.fetch_and(~qcamo::mgs3::kWheelPause);
+    }
+    LOG_INFO("wheel pause %s", pause_menu ? "set" : "cleared");
+}
+
 void __fastcall task_dispatch_hook()
 {
     original_task_dispatch();
@@ -289,27 +309,14 @@ void __fastcall task_dispatch_hook()
     } else {
         int requested = pending_uniform.exchange(-1);
         if (requested >= 0) {
+            // Menu can close immediately after accepting an equip. Own the
+            // pause before any model mutation and retain it through refresh.
+            set_menu_pause(true);
             change_camo(static_cast<uint8_t>(requested),
                         static_cast<uint8_t>(pending_face.exchange(-1)));
         }
     }
     applying = false;
-}
-
-void set_menu_pause(bool pause_menu)
-{
-    if (pause_menu == menu_paused) {
-        return;
-    }
-    auto& pause = *reinterpret_cast<uint32_t*>(image_base + qcamo::mgs3::kPauseLevel);
-    std::atomic_ref pause_level(pause);
-    if (pause_menu) {
-        pause_level.fetch_or(qcamo::mgs3::kWheelPause);
-    } else {
-        pause_level.fetch_and(~qcamo::mgs3::kWheelPause);
-    }
-    menu_paused = pause_menu;
-    LOG_INFO("wheel pause %s", pause_menu ? "set" : "cleared");
 }
 
 bool queue_uniform(uint8_t uniform, uint8_t face)
@@ -489,7 +496,7 @@ DWORD WINAPI init(LPVOID)
                 LOG_INFO("menu closed: %s", qcamo::gate_name(block));
             }
         }
-        set_menu_pause(qcamo::menu_open.load());
+        set_menu_pause(qcamo::menu_open.load() || change_busy.load());
         Sleep(10);
     }
 }
