@@ -484,6 +484,12 @@ DWORD WINAPI init(LPVOID)
 
 } // namespace
 
+// Other ASIs (modern-controls-mgs3) hold the menu open while D-pad up is held.
+extern "C" __declspec(dllexport) void qcamo_menu_hold(int held)
+{
+    qcamo::external_hold.store(held != 0);
+}
+
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH) {

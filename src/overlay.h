@@ -8,6 +8,9 @@ namespace qcamo {
 // Render-thread menu state, consumed by the pause state machine.
 extern std::atomic_bool menu_open;
 
+// External hold from another ASI (modern-controls-mgs3 forwards D-pad up).
+extern std::atomic_bool external_hold;
+
 // UI sound cue the menu wants played, set on the render thread and drained by
 // the gameplay thread, which is the only one that may call into the game. One
 // slot is enough: a frame never owes more than one menu sound.

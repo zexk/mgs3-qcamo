@@ -435,7 +435,8 @@ void poll_menu()
     // Both are read as levels rather than edges so the chord opens whichever
     // way round it is pressed.
     bool keyboard = (GetAsyncKeyState(kHoldKey) & 0x8000) != 0;
-    bool held = keyboard || (pad.shoulder && (open || pad.open_button));
+    bool external = external_hold.load();
+    bool held = keyboard || external || (pad.shoulder && (open || pad.open_button));
     bool requested = held;
     // Gating: the menu only exists during gameplay. While open, our own wheel
     // pause bit is tolerated; on the opening edge the game must be fully
@@ -466,13 +467,17 @@ void poll_menu()
     if (held != open) {
         open = held;
         menu_open = open;
-        LOG_INFO("menu %s by %s", open ? "opened" : "closed", keyboard ? "keyboard" : "pad");
+        const char* source = external ? "external" : keyboard ? "keyboard" : "pad";
+        LOG_INFO("menu %s by %s", open ? "opened" : "closed", source);
         pending_sound = open ? mgs3::kSoundOpen : mgs3::kSoundCancel;
         // Rows are sorted best camouflage first, so opening on row 0 puts the
         // cursor on the best swap available rather than on what Snake has on.
         if (open) {
             selected = 0;
             rows_dirty = true;
+            // The external hold is D-pad up, which is also the cursor; do not
+            // let the opening press move the selection.
+            return;
         }
     }
     if (!open) return;
@@ -764,6 +769,7 @@ bool install_hooks()
 } // namespace
 
 std::atomic_bool menu_open;
+std::atomic_bool external_hold;
 std::atomic_int pending_sound;
 
 void refresh_inventory()
