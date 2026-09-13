@@ -439,10 +439,13 @@ DWORD WINAPI init(LPVOID)
     crash_dump_path = own_dir() / L"qcamo-crash.dmp";
     auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(game);
     auto nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(image_base + dos->e_lfanew);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE || nt->Signature != IMAGE_NT_SIGNATURE ||
-        nt->FileHeader.TimeDateStamp != qcamo::mgs3::kExpectedTimestamp) {
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || nt->Signature != IMAGE_NT_SIGNATURE) {
         LOG_ERROR("unsupported executable");
         return 0;
+    }
+    if (nt->FileHeader.TimeDateStamp != qcamo::mgs3::kExpectedTimestamp) {
+        LOG_WARN("executable timestamp %08X does not match expected %08X; continuing anyway",
+                 nt->FileHeader.TimeDateStamp, qcamo::mgs3::kExpectedTimestamp);
     }
     image_size = nt->OptionalHeader.SizeOfImage;
     if (!AddVectoredExceptionHandler(0, record_change_exception)) {
