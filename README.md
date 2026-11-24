@@ -14,10 +14,12 @@ of Metal Gear Solid 3, styled after the Delta remake's camo menu.
 
 Hold `G`, use `W`/`S` or `Up`/`Down`, and press Enter to equip. On a pad,
 press triangle plus L1, select with the D-pad, and equip with cross. Releasing
-`G` or L1 closes the menu.
+`G` or L1 closes the menu. When modern-controls opens the menu with D-pad up,
+keep it held and select with the right stick instead of the D-pad or left stick.
 
-The menu only opens during playable gameplay. Changes update both Snake's model
-and camouflage index and survive area transitions.
+The menu stays closed while aiming through the SVD, Mosin Nagant, or RPG-7
+scope. Camouflage changes update both Snake's model and camouflage index and
+survive area transitions.
 
 ## Install
 

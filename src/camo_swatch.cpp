@@ -24,7 +24,7 @@ static_assert(kWidth == kHeight * kSwatchAspect);
 constexpr std::array kIcons = {
     "00ad439e", // olive drab
     "003e43b2", // tiger stripe
-    "000a4397", // leaf
+    "00b84391", // leaf
     "005c43b3", // tree bark
     "0026436e", // choco chip
     "002343af", // splitter
@@ -32,7 +32,7 @@ constexpr std::array kIcons = {
     "004c43af", // squares
     "004b43bd", // water
     "00b71656", // black
-    "0007925f", // snow
+    "00e643ae", // snow
     "007b439a", // naked
     "005ceaf7", // sneaking suit
     "008043ad", // scientist
@@ -41,7 +41,7 @@ constexpr std::array kIcons = {
     "001b43b4", // tuxedo
     "00054383", // hornet stripe
     "002043af", // spider
-    "00e643ae", // moss
+    "000a4397", // moss
     "0049437a", // fire
     "00b79656", // spirit
     "00fe3dac", // cold war
@@ -50,7 +50,7 @@ constexpr std::array kIcons = {
     "00184159", // desert tiger
     "0024436b", // dpm
     "00a2437a", // flecktarn
-    "00b84391", // auscam
+    "0007925f", // auscam
     "00030da5", // animals
     "00ca4367", // fly
     "00040da5", // banana

@@ -102,21 +102,26 @@ struct Pad {
     bool down;
 };
 
-constexpr Pad xinput_pad(WORD buttons, SHORT stick_y)
+constexpr Pad xinput_pad(WORD buttons, SHORT stick_y, bool external = false)
 {
     return {
         (buttons & XINPUT_GAMEPAD_LEFT_SHOULDER) != 0,
         (buttons & XINPUT_GAMEPAD_Y) != 0,
         (buttons & XINPUT_GAMEPAD_A) != 0,
-        (buttons & XINPUT_GAMEPAD_DPAD_UP) != 0 || stick_y > 16384,
-        (buttons & XINPUT_GAMEPAD_DPAD_DOWN) != 0 || stick_y < -16384,
+        (!external && (buttons & XINPUT_GAMEPAD_DPAD_UP) != 0) || stick_y > 16384,
+        (!external && (buttons & XINPUT_GAMEPAD_DPAD_DOWN) != 0) || stick_y < -16384,
     };
 }
 
 static_assert(xinput_pad(XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_Y, 0).shoulder &&
               xinput_pad(XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_Y, 0).open_button &&
               xinput_pad(XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_DPAD_DOWN, 0).equip &&
-              xinput_pad(0, 20000).up && xinput_pad(0, -20000).down);
+              xinput_pad(0, 20000).up && xinput_pad(0, -20000).down &&
+              !xinput_pad(XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN, 0, true).up &&
+              !xinput_pad(XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN, 0, true).down &&
+              xinput_pad(XINPUT_GAMEPAD_DPAD_UP, -20000, true).down &&
+              !xinput_pad(XINPUT_GAMEPAD_DPAD_UP, -20000, true).up &&
+              xinput_pad(0, 20000, true).up);
 
 // Flat wrappers preserve Steam's structures: digital data is two packed bytes;
 // analog data is mode, x, y, active with padding to 16 bytes.
@@ -137,7 +142,7 @@ struct SteamPad {
     AnalogDataFn analog_data;
     uint64_t controller;
     uint64_t triangle, cross, shoulder, up, down;
-    uint64_t move;
+    uint64_t move, camera;
 };
 
 SteamPad steam_pad;
@@ -191,6 +196,7 @@ bool open_pad()
     }
     if (analog_handle && steam_pad.analog_data) {
         steam_pad.move = analog_handle(steam_pad.self, "ingame_stick_move");
+        steam_pad.camera = analog_handle(steam_pad.self, "ingame_stick_cam_dir");
     }
     if (!steam_pad.shoulder || !steam_pad.triangle || !steam_pad.cross) {
         LOG_WARN("steam input actions not found");
@@ -212,7 +218,7 @@ constexpr int stick_step(float y, bool active)
 static_assert(stick_step(0.6f, true) == -1 && stick_step(-0.6f, true) == 1 &&
               stick_step(0.4f, true) == 0 && stick_step(1.0f, false) == 0);
 
-Pad read_pad()
+Pad read_pad(bool external)
 {
     Pad pad{};
     if (open_pad()) {
@@ -226,12 +232,13 @@ Pad read_pad()
         pad.open_button = down(steam_pad.triangle);
         pad.equip = down(steam_pad.cross);
         int stick = 0;
-        if (steam_pad.move && steam_pad.analog_data) {
-            auto data = steam_pad.analog_data(steam_pad.self, steam_pad.controller, steam_pad.move);
+        uint64_t action = external ? steam_pad.camera : steam_pad.move;
+        if (action && steam_pad.analog_data) {
+            auto data = steam_pad.analog_data(steam_pad.self, steam_pad.controller, action);
             stick = stick_step(data.y, data.active);
         }
-        pad.up = down(steam_pad.up) || stick < 0;
-        pad.down = down(steam_pad.down) || stick > 0;
+        pad.up = (!external && down(steam_pad.up)) || stick < 0;
+        pad.down = (!external && down(steam_pad.down)) || stick > 0;
     }
 
     // Steam hides XInput devices while managing them. Polling both paths lets
@@ -246,7 +253,9 @@ Pad read_pad()
     for (DWORD slot = 0; get_state && slot < XUSER_MAX_COUNT; ++slot) {
         XINPUT_STATE state{};
         if (get_state(slot, &state) != ERROR_SUCCESS) continue;
-        Pad native = xinput_pad(state.Gamepad.wButtons, state.Gamepad.sThumbLY);
+        Pad native = xinput_pad(state.Gamepad.wButtons,
+                                external ? state.Gamepad.sThumbRY : state.Gamepad.sThumbLY,
+                                external);
         pad.shoulder |= native.shoulder;
         pad.open_button |= native.open_button;
         pad.equip |= native.equip;
@@ -422,7 +431,8 @@ constexpr int kHoldKey = 'G';
 
 void poll_menu()
 {
-    Pad pad = read_pad();
+    bool external = external_hold.load();
+    Pad pad = read_pad(external);
     static Pad previous;
     auto fresh = [&](bool Pad::*button) { return pad.*button && !(previous.*button); };
     bool pad_up = fresh(&Pad::up);
@@ -435,7 +445,6 @@ void poll_menu()
     // Both are read as levels rather than edges so the chord opens whichever
     // way round it is pressed.
     bool keyboard = (GetAsyncKeyState(kHoldKey) & 0x8000) != 0;
-    bool external = external_hold.load();
     bool held = keyboard || external || (pad.shoulder && (open || pad.open_button));
     bool requested = held;
     // Gating: the menu only exists during gameplay. While open, our own wheel
@@ -475,8 +484,7 @@ void poll_menu()
         if (open) {
             selected = 0;
             rows_dirty = true;
-            // The external hold is D-pad up, which is also the cursor; do not
-            // let the opening press move the selection.
+            // Opening never moves the selection, even with a stick already tilted.
             return;
         }
     }
@@ -617,8 +625,14 @@ void draw_menu(const std::vector<uint8_t>& uniforms)
         text({cursor, hint_y}, hint_height, kHint, value);
         cursor += hud_text_width(value, hint_height) + 11 * scale;
     };
-    hud_dpad(draw, {cursor, hint_y}, hint_height, kHint);
-    cursor += hint_height + 4 * scale;
+    bool external = external_hold.load();
+    if (external) {
+        hud_tile(draw, {cursor, hint_y}, hint_height, "RS");
+        cursor += hud_tile_width("RS", hint_height) + 4 * scale;
+    } else {
+        hud_dpad(draw, {cursor, hint_y}, hint_height, kHint);
+        cursor += hint_height + 4 * scale;
+    }
     label("SELECT");
     if (auto* icon = hud_cross_button(device)) {
         // The button art carries its own padding, so it reads right a little
@@ -630,8 +644,13 @@ void draw_menu(const std::vector<uint8_t>& uniforms)
         cursor += glyph + 2 * scale;
     }
     label("EQUIP");
-    hud_tile(draw, {cursor, hint_y}, hint_height, "L1");
-    cursor += hud_tile_width("L1", hint_height) + 4 * scale;
+    if (external) {
+        hud_dpad(draw, {cursor, hint_y}, hint_height, kHint);
+        cursor += hint_height + 4 * scale;
+    } else {
+        hud_tile(draw, {cursor, hint_y}, hint_height, "L1");
+        cursor += hud_tile_width("L1", hint_height) + 4 * scale;
+    }
     label("HOLD");
 }
 

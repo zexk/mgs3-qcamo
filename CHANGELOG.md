@@ -4,6 +4,8 @@
 
 - Keep the camouflage menu closed while aiming through the SVD, Mosin Nagant,
   or RPG-7 scope so its shortcut does not interrupt aiming.
+- With modern-controls, hold D-pad up and select with the right stick.
+- Corrected the Leaf, Snow, Moss, and Auscam camouflage swatches.
 
 ## 1.0.4
 
