@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.5
+
+- Keep the camouflage menu closed while aiming through the SVD, Mosin Nagant,
+  or RPG-7 scope so its shortcut does not interrupt aiming.
+
 ## 1.0.4
 
 - Added native XInput fallback for controllers unavailable through Steam Input.

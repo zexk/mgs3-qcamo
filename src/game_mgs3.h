@@ -79,6 +79,19 @@ inline constexpr int kStateProne = 3;
 inline constexpr int kStateOnWall = 0x3B;
 inline constexpr int kStateProneOverride = 0xA9;
 
+// Status word 5 holds the subject-weapon camera (0xA9, tested at 0x3439C9)
+// and first-person view (0xBA). The pad plugin at 0x357B30 reads the active
+// weapon ID from the low byte at weapon record +0x20.
+inline constexpr uint32_t kViewStatus = kPlayerState + 5 * sizeof(uint32_t);
+inline constexpr uint32_t kScopeCamera = 1u << (0xA9 % 32);
+inline constexpr uint32_t kFirstPerson = 1u << (0xBA % 32);
+inline constexpr uint32_t kPlayerWorkSlot = 0x1E16CC0;
+inline constexpr uint32_t kWeaponRecord = 0x6F8;
+inline constexpr uint32_t kWeaponId = 0x20;
+inline constexpr uint8_t kSvd = 15;
+inline constexpr uint8_t kMosinNagant = 16;
+inline constexpr uint8_t kRpg7 = 17;
+
 // One 0x18-byte record per uniform and per face paint, indexed by the equipped
 // byte. +0x00 is the internal name, +0x08 the value table: 27 terrains of 5
 // postures, signed bytes, ten times the percentage each contributes.

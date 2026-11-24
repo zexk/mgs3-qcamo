@@ -31,6 +31,7 @@ enum class GateBlock {
     Backpack,
     Viewer,
     Cutscene,
+    WeaponScope,
     Pause,
 };
 
@@ -43,6 +44,7 @@ inline const char* gate_name(GateBlock block)
     case GateBlock::Backpack: return "backpack unavailable";
     case GateBlock::Viewer: return "survival viewer open";
     case GateBlock::Cutscene: return "cutscene or uncontrollable state";
+    case GateBlock::WeaponScope: return "weapon scope";
     case GateBlock::Pause: return "game paused";
     }
     return "unknown";
@@ -85,6 +87,29 @@ inline GateBlock gate_state(uintptr_t base, bool allow_wheel)
                      mem::read<uint32_t>(base + mgs3::kPlayerFlagsB);
     if ((flags & mgs3::kNoPopupMask) != 0) {
         return GateBlock::Cutscene;
+    }
+    if (!mem::range_readable(base + mgs3::kViewStatus, sizeof(uint32_t))) {
+        return GateBlock::WeaponScope;
+    }
+    uint32_t view = mem::read<uint32_t>(base + mgs3::kViewStatus);
+    if (view & (mgs3::kFirstPerson | mgs3::kScopeCamera)) {
+        if (!mem::range_readable(base + mgs3::kPlayerWorkSlot, sizeof(uintptr_t))) {
+            return GateBlock::WeaponScope;
+        }
+        auto player = mem::read<uintptr_t>(base + mgs3::kPlayerWorkSlot);
+        if (!player || !mem::range_readable(player + mgs3::kWeaponRecord, sizeof(uintptr_t))) {
+            return GateBlock::WeaponScope;
+        }
+        auto weapon = mem::read<uintptr_t>(player + mgs3::kWeaponRecord);
+        if (weapon) {
+            if (!mem::range_readable(weapon + mgs3::kWeaponId, sizeof(uint8_t))) {
+                return GateBlock::WeaponScope;
+            }
+            auto id = mem::read<uint8_t>(weapon + mgs3::kWeaponId);
+            if (id == mgs3::kSvd || id == mgs3::kMosinNagant || id == mgs3::kRpg7) {
+                return GateBlock::WeaponScope;
+            }
+        }
     }
     if (!mem::range_readable(base + mgs3::kPauseLevel, sizeof(uint32_t))) {
         return GateBlock::Pause;
